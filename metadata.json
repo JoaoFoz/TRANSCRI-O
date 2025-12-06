@@ -1,0 +1,5 @@
+{
+  "name": "Copy of LegalTranscript AI Parser",
+  "description": "An AI-powered tool to parse audio and SMS transcription logs, extract metadata, separate sessions into individual PDFs, and generate structured Excel reports.",
+  "requestFramePermissions": []
+}
