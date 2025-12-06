@@ -11,12 +11,15 @@
     />
     <script>
         tailwind.config = {
+            darkMode: 'class',
             theme: {
                 extend: {
                     colors: {
                         slate: {
-                            850: '#1e293b',
+                            750: '#2d3748',
+                            850: '#1a202c',
                             900: '#0f172a',
+                            950: '#020617',
                         }
                     }
                 }
@@ -38,8 +41,37 @@
   }
 }
 </script>
+<style>
+    /* Custom Scrollbar */
+    .custom-scrollbar::-webkit-scrollbar {
+        width: 8px;
+        height: 8px;
+    }
+    .custom-scrollbar::-webkit-scrollbar-track {
+        background: transparent; 
+        border-radius: 4px;
+    }
+    .custom-scrollbar::-webkit-scrollbar-thumb {
+        background: #cbd5e1; /* Slate-300 */
+        border-radius: 4px;
+    }
+    .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+        background: #94a3b8; /* Slate-400 */
+    }
+
+    /* Dark mode scrollbar overrides */
+    .dark .custom-scrollbar::-webkit-scrollbar-track {
+        background: #1e293b; 
+    }
+    .dark .custom-scrollbar::-webkit-scrollbar-thumb {
+        background: #475569; 
+    }
+    .dark .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+        background: #64748b; 
+    }
+</style>
 </head>
-  <body class="bg-slate-50 text-slate-900 antialiased selection:bg-blue-200">
+  <body class="bg-slate-50 dark:bg-slate-950 text-slate-800 dark:text-slate-200 antialiased selection:bg-blue-500 selection:text-white transition-colors duration-300">
     <div id="root"></div>
   </body>
 </html>
