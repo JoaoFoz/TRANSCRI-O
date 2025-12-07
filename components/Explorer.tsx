@@ -1,215 +1,428 @@
-import React, { useState, useMemo, useRef, useEffect } from 'react';
-import { Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType, BorderStyle } from 'docx';
-import { ParsedSession, SavedTag, AliasMap } from '../types';
+import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
+import { ParsedSession, SavedTag, AliasMap, LegalReference, LegalReferenceType } from '../types';
 
-interface ExplorerProps {
-  sessions: ParsedSession[];
-  onBack: () => void;
-  onImport: (e: React.ChangeEvent<HTMLInputElement>) => void;
-  onGetAsset: (session: ParsedSession, type: 'pdf' | 'docx') => Promise<string | null>;
-  
-  // Persistent State
-  savedTags: SavedTag[];
-  setSavedTags: React.Dispatch<React.SetStateAction<SavedTag[]>>;
-  aliasMap: AliasMap;
-  setAliasMap: React.Dispatch<React.SetStateAction<AliasMap>>;
-  onSaveProject: () => void;
-  
-  // Delete Handler
-  onDeleteSessions: (sessionIds: string[]) => void;
-  onDeleteFiles: (fileNames: string[]) => void;
-  
-  // Optional export handler from parent, though we implement local export too
-  onExportSessions?: (sessions: ParsedSession[]) => void;
-}
+// --- LEGAL MATTER MODAL ---
 
-// --- IMPORT DATA MODAL ---
-interface ImportModalProps {
+interface LegalMatterModalProps {
+    legalReferences: LegalReference[];
+    onSave: (refs: LegalReference[]) => void;
     onClose: () => void;
-    onImport: (e: React.ChangeEvent<HTMLInputElement>) => void;
-    sessions: ParsedSession[];
-    onDeleteFiles: (fileNames: string[]) => void;
 }
 
-const ImportModal: React.FC<ImportModalProps> = ({ onClose, onImport, sessions, onDeleteFiles }) => {
-    const folderInputRef = useRef<HTMLInputElement>(null);
-    const [activeTab, setActiveTab] = useState<'import' | 'manage'>('import');
-    const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set());
+const LegalMatterModal: React.FC<LegalMatterModalProps> = ({ legalReferences, onSave, onClose }) => {
+    const [activeTab, setActiveTab] = useState<LegalReferenceType>('ARTICLE');
+    const [viewMode, setViewMode] = useState<'ACTIVE' | 'ARCHIVED'>('ACTIVE');
+    
+    const [newItemLabel, setNewItemLabel] = useState('');
+    const [newItemDesc, setNewItemDesc] = useState('');
+    const [bulkText, setBulkText] = useState('');
+    const [isBulkMode, setIsBulkMode] = useState(false);
+    
+    // Checkbox Selection State
+    const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
-    const loadedFiles = useMemo(() => {
-        const counts: Record<string, number> = {};
-        sessions.forEach(s => {
-            const name = s.sourceFileName || 'Desconhecido';
-            counts[name] = (counts[name] || 0) + 1;
+    const idCounter = useRef(0);
+
+    // Derived List of items to display
+    const visibleItems = useMemo(() => {
+        return legalReferences.filter(r => {
+            const rStatus = r.status || 'ACTIVE'; // Default to ACTIVE
+            if (r.type !== activeTab) return false;
+            if (viewMode === 'ACTIVE') return rStatus === 'ACTIVE';
+            if (viewMode === 'ARCHIVED') return rStatus === 'ARCHIVED';
+            return false;
         });
-        return Object.entries(counts).map(([name, count]) => ({ name, count }));
-    }, [sessions]);
+    }, [legalReferences, activeTab, viewMode]);
 
-    const toggleFile = (name: string) => {
-        const newSet = new Set(selectedFiles);
-        if (newSet.has(name)) newSet.delete(name);
-        else newSet.add(name);
-        setSelectedFiles(newSet);
+    // Clear selection when changing view contexts
+    useEffect(() => {
+        setSelectedIds(new Set());
+    }, [activeTab, viewMode]);
+
+    const generateId = () => {
+        idCounter.current += 1;
+        return `ref_${Date.now()}_${idCounter.current}_${Math.floor(Math.random() * 1000)}`;
     };
 
-    const toggleAllFiles = () => {
-        if (selectedFiles.size === loadedFiles.length) {
-            setSelectedFiles(new Set());
+    const handleAddSingle = (e?: React.FormEvent) => {
+        if (e) e.preventDefault();
+        if (!newItemLabel.trim()) return;
+        
+        const labels = newItemLabel.split(',').map(s => s.trim()).filter(s => s.length > 0);
+        
+        const newRefs: LegalReference[] = labels.map((label) => ({
+            id: generateId(), 
+            type: activeTab,
+            label: label,
+            description: newItemDesc.trim(),
+            status: 'ACTIVE'
+        }));
+
+        const updatedList = [...legalReferences, ...newRefs];
+        onSave(updatedList);
+        
+        setNewItemLabel('');
+        setNewItemDesc('');
+    };
+
+    const handleBulkImport = () => {
+        if (!bulkText.trim()) return;
+        const lines = bulkText.split(/[\n,]/).filter(l => l.trim().length > 0);
+        
+        const newRefs: LegalReference[] = lines.map((line) => ({
+            id: generateId(),
+            type: activeTab,
+            label: line.trim().substring(0, 30) + (line.length > 30 ? '...' : ''), 
+            description: line.trim(),
+            status: 'ACTIVE'
+        }));
+        
+        const updatedList = [...legalReferences, ...newRefs];
+        onSave(updatedList);
+
+        setBulkText('');
+        setIsBulkMode(false);
+    };
+
+    const toggleSelection = (id: string) => {
+        if (viewMode === 'ACTIVE') return; // Disable selection in active mode
+        setSelectedIds(prev => {
+            const next = new Set(prev);
+            if (next.has(id)) next.delete(id);
+            else next.add(id);
+            return next;
+        });
+    };
+
+    const toggleAll = () => {
+        if (viewMode === 'ACTIVE') return;
+        if (selectedIds.size === visibleItems.length) {
+            setSelectedIds(new Set()); 
         } else {
-            setSelectedFiles(new Set(loadedFiles.map(f => f.name)));
+            setSelectedIds(new Set(visibleItems.map(r => r.id)));
         }
     };
 
-    const handleBulkDelete = () => {
-        onDeleteFiles(Array.from(selectedFiles));
-        setSelectedFiles(new Set());
+    // --- ACTIONS ---
+
+    // Direct Archive Single Item (Button on row)
+    const handleArchiveSingle = (e: React.MouseEvent, id: string) => {
+        e.stopPropagation();
+        const updatedList = legalReferences.map(r => 
+            r.id === id ? { ...r, status: 'ARCHIVED' as const } : r
+        );
+        onSave(updatedList);
+    };
+
+    // Restore Selected (Archive View)
+    const handleRestoreSelected = () => {
+        if (selectedIds.size === 0) return;
+        
+        const updatedList = legalReferences.map(r => {
+            if (selectedIds.has(r.id)) {
+                return { ...r, status: 'ACTIVE' as const };
+            }
+            return r;
+        });
+        onSave(updatedList);
+        setSelectedIds(new Set());
+    };
+
+    // Hard Delete Selected (Archive View)
+    const handleHardDeleteSelected = () => {
+        if (selectedIds.size === 0) return;
+        
+        if (window.confirm(`Eliminar permanentemente ${selectedIds.size} itens?`)) {
+            const updatedList = legalReferences.filter(r => !selectedIds.has(r.id));
+            onSave(updatedList);
+            setSelectedIds(new Set());
+        }
+    };
+
+    const getTabColor = (type: LegalReferenceType, isActive: boolean) => {
+        if (type === 'ARTICLE') {
+            return isActive 
+                ? 'border-b-2 border-red-500 text-red-600 dark:text-red-400 bg-red-50/50 dark:bg-red-900/10' 
+                : 'text-slate-500 hover:bg-slate-50 dark:hover:bg-slate-800';
+        }
+        if (type === 'FACT') {
+            return isActive 
+                ? 'border-b-2 border-amber-500 text-amber-600 dark:text-amber-400 bg-amber-50/50 dark:bg-amber-900/10' 
+                : 'text-slate-500 hover:bg-slate-50 dark:hover:bg-slate-800';
+        }
+        if (type === 'TAG') {
+            return isActive 
+                ? 'border-b-2 border-emerald-500 text-emerald-600 dark:text-emerald-400 bg-emerald-50/50 dark:bg-emerald-900/10' 
+                : 'text-slate-500 hover:bg-slate-50 dark:hover:bg-slate-800';
+        }
+        return '';
+    };
+
+    const getLabelColor = (type: LegalReferenceType) => {
+        if (type === 'ARTICLE') return 'text-red-700 dark:text-red-400';
+        if (type === 'FACT') return 'text-amber-700 dark:text-amber-400';
+        if (type === 'TAG') return 'text-emerald-700 dark:text-emerald-400';
+        return '';
     };
 
     return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 dark:bg-slate-900/80 backdrop-blur-sm p-4 animate-fade-in">
-            <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl max-w-3xl w-full overflow-hidden flex flex-col max-h-[90vh] border border-transparent dark:border-slate-800">
-                <div className="p-6 border-b border-slate-100 dark:border-slate-800 flex justify-between items-center bg-slate-50 dark:bg-slate-900">
-                    <div>
-                        <h3 className="text-xl font-bold text-slate-800 dark:text-white">Gestão de Dados</h3>
-                        <p className="text-sm text-slate-500 dark:text-slate-400">Adicionar novos dados ou gerir ficheiros existentes.</p>
-                    </div>
-                    <button onClick={onClose} className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-slate-200 dark:hover:bg-slate-800 text-slate-400 hover:text-slate-600 dark:hover:text-white transition-colors">
-                        <i className="fa-solid fa-xmark text-xl"></i>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 dark:bg-slate-950/80 backdrop-blur-sm p-4 animate-fade-in">
+            <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl max-w-2xl w-full max-h-[90vh] flex flex-col border border-transparent dark:border-slate-800">
+                <div className="p-5 border-b border-slate-100 dark:border-slate-800 flex justify-between items-center">
+                    <h3 className="text-xl font-bold text-slate-800 dark:text-white">Gestão de Matéria Legal</h3>
+                    <button onClick={onClose}><i className="fa-solid fa-xmark text-xl text-slate-400"></i></button>
+                </div>
+
+                {/* MAIN TABS */}
+                <div className="flex border-b border-slate-200 dark:border-slate-800">
+                    <button type="button" onClick={() => setActiveTab('ARTICLE')} className={`flex-1 py-3 text-sm font-bold ${getTabColor('ARTICLE', activeTab === 'ARTICLE')}`}>
+                        Artigo
+                    </button>
+                    <button type="button" onClick={() => setActiveTab('FACT')} className={`flex-1 py-3 text-sm font-bold ${getTabColor('FACT', activeTab === 'FACT')}`}>
+                        Facto
+                    </button>
+                    <button type="button" onClick={() => setActiveTab('TAG')} className={`flex-1 py-3 text-sm font-bold ${getTabColor('TAG', activeTab === 'TAG')}`}>
+                        Etiqueta
                     </button>
                 </div>
 
-                {/* TABS */}
-                <div className="flex border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900">
+                {/* VIEW MODE TOGGLE */}
+                <div className="px-5 py-3 bg-slate-50 dark:bg-slate-900 flex justify-end items-center gap-2 border-b border-slate-100 dark:border-slate-800">
+                    <span className="text-xs font-bold text-slate-400 uppercase mr-2">Modo:</span>
                     <button 
-                        onClick={() => setActiveTab('import')}
-                        className={`flex-1 py-3 text-sm font-bold text-center transition-colors ${activeTab === 'import' ? 'border-b-2 border-blue-600 dark:border-blue-500 text-blue-600 dark:text-blue-400 bg-blue-50/50 dark:bg-slate-800/50' : 'text-slate-500 dark:text-slate-500 hover:bg-slate-50 dark:hover:bg-slate-800 hover:text-slate-700 dark:hover:text-slate-300'}`}
+                        onClick={() => setViewMode('ACTIVE')} 
+                        className={`px-3 py-1 text-xs rounded-full font-bold transition-all ${viewMode === 'ACTIVE' ? 'bg-blue-600 text-white shadow-md' : 'bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-300 dark:hover:bg-slate-700'}`}
                     >
-                        <i className="fa-solid fa-cloud-arrow-up mr-2"></i>Importar
+                        Ativos
                     </button>
                     <button 
-                        onClick={() => setActiveTab('manage')}
-                        className={`flex-1 py-3 text-sm font-bold text-center transition-colors ${activeTab === 'manage' ? 'border-b-2 border-blue-600 dark:border-blue-500 text-blue-600 dark:text-blue-400 bg-blue-50/50 dark:bg-slate-800/50' : 'text-slate-500 dark:text-slate-500 hover:bg-slate-50 dark:hover:bg-slate-800 hover:text-slate-700 dark:hover:text-slate-300'}`}
+                        onClick={() => setViewMode('ARCHIVED')} 
+                        className={`px-3 py-1 text-xs rounded-full font-bold transition-all ${viewMode === 'ARCHIVED' ? 'bg-slate-600 text-white shadow-md' : 'bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-300 dark:hover:bg-slate-700'}`}
                     >
-                        <i className="fa-regular fa-folder-open mr-2"></i>Ficheiros Carregados
+                        Arquivo
                     </button>
                 </div>
-                
-                <div className="p-8 overflow-y-auto custom-scrollbar flex-1 bg-white dark:bg-slate-900">
-                    {activeTab === 'import' ? (
-                        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                            {/* Option 1: PDF Raw */}
-                            <label className="group relative flex flex-col items-center justify-center p-6 border-2 border-dashed border-blue-200 dark:border-blue-500/30 hover:border-blue-500 dark:hover:border-blue-500 bg-blue-50/30 dark:bg-slate-800/30 hover:bg-blue-50 dark:hover:bg-slate-800 rounded-xl cursor-pointer transition-all">
-                                <input type="file" accept=".pdf" multiple onChange={(e) => { onImport(e); onClose(); }} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" />
-                                <div className="w-14 h-14 bg-white dark:bg-blue-900/30 text-blue-500 dark:text-blue-400 rounded-full shadow-sm flex items-center justify-center mb-4 group-hover:scale-110 transition-transform">
-                                    <i className="fa-solid fa-file-pdf text-2xl"></i>
-                                </div>
-                                <h4 className="font-bold text-slate-800 dark:text-slate-200 mb-1">Novos PDFs</h4>
-                                <p className="text-xs text-center text-slate-500 dark:text-slate-400">Processar documentos originais (Escutas/SMS)</p>
-                            </label>
 
-                            {/* Option 2: Folder */}
-                            <div 
-                                onClick={() => folderInputRef.current?.click()}
-                                className="group relative flex flex-col items-center justify-center p-6 border-2 border-dashed border-yellow-200 dark:border-yellow-500/30 hover:border-yellow-500 dark:hover:border-yellow-500 bg-yellow-50/30 dark:bg-slate-800/30 hover:bg-yellow-50 dark:hover:bg-slate-800 rounded-xl cursor-pointer transition-all"
-                            >
-                                <input ref={folderInputRef} type="file" multiple onChange={(e) => { onImport(e); onClose(); }} className="hidden" {...({ webkitdirectory: "", directory: "" } as any)} />
-                                <div className="w-14 h-14 bg-white dark:bg-yellow-900/30 text-yellow-500 dark:text-yellow-400 rounded-full shadow-sm flex items-center justify-center mb-4 group-hover:scale-110 transition-transform">
-                                    <i className="fa-regular fa-folder-open text-2xl"></i>
-                                </div>
-                                <h4 className="font-bold text-slate-800 dark:text-slate-200 mb-1">Pasta Já Tratada</h4>
-                                <p className="text-xs text-center text-slate-500 dark:text-slate-400">Importar ficheiros JSON e PDFs de uma pasta</p>
+                <div className="p-5 flex-1 overflow-y-auto custom-scrollbar bg-slate-50 dark:bg-slate-900/50 [&::-webkit-scrollbar-track]:bg-white dark:[&::-webkit-scrollbar-track]:bg-slate-900">
+                    
+                    {/* ADD NEW (Only Active) */}
+                    {viewMode === 'ACTIVE' && (
+                        <div className="bg-white dark:bg-slate-900 p-4 rounded-xl border border-slate-200 dark:border-slate-800 shadow-sm mb-4">
+                            <div className="flex justify-between items-center mb-3">
+                                <h4 className="font-bold text-sm text-slate-700 dark:text-slate-200">Novo Registo</h4>
+                                <button type="button" onClick={() => setIsBulkMode(!isBulkMode)} className="text-xs text-blue-600 dark:text-blue-400 font-medium hover:underline">
+                                    {isBulkMode ? "Voltar ao Normal" : "Colar Lista (Bulk)"}
+                                </button>
                             </div>
-
-                            {/* Option 3: ZIP Project */}
-                            <label className="group relative flex flex-col items-center justify-center p-6 border-2 border-dashed border-purple-200 dark:border-purple-500/30 hover:border-purple-500 dark:hover:border-purple-500 bg-purple-50/30 dark:bg-slate-800/30 hover:bg-purple-50 dark:hover:bg-slate-800 rounded-xl cursor-pointer transition-all">
-                                <input type="file" accept=".zip" multiple onChange={(e) => { onImport(e); onClose(); }} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" />
-                                <div className="w-14 h-14 bg-white dark:bg-purple-900/30 text-purple-500 dark:text-purple-400 rounded-full shadow-sm flex items-center justify-center mb-4 group-hover:scale-110 transition-transform">
-                                    <i className="fa-solid fa-file-zipper text-2xl"></i>
+                            
+                            {isBulkMode ? (
+                                <div className="space-y-2">
+                                    <textarea 
+                                        value={bulkText} 
+                                        onChange={e => setBulkText(e.target.value)} 
+                                        placeholder="Cole aqui a sua lista (separada por ENTER ou vírgula)..."
+                                        className="w-full h-32 p-3 text-sm border border-slate-300 dark:border-slate-700 rounded-lg focus:ring-2 focus:ring-blue-500 bg-white dark:bg-slate-800 dark:text-white custom-scrollbar"
+                                    />
+                                    <button type="button" onClick={handleBulkImport} className="w-full py-2 bg-blue-600 text-white rounded-lg font-bold text-sm hover:bg-blue-700">Importar Lista</button>
                                 </div>
-                                <h4 className="font-bold text-slate-800 dark:text-slate-200 mb-1">Projeto ZIP</h4>
-                                <p className="text-xs text-center text-slate-500 dark:text-slate-400">Restaurar um backup completo (Project.json)</p>
-                            </label>
-                        </div>
-                    ) : (
-                        // MANAGE FILES TAB
-                        <div className="space-y-4">
-                             {loadedFiles.length === 0 ? (
-                                 <div className="text-center py-10 text-slate-400 dark:text-slate-500 italic">Nenhum ficheiro carregado.</div>
-                             ) : (
-                                 <div className="flex flex-col gap-3">
-                                     {/* BULK HEADER */}
-                                     <div className="flex justify-between items-center p-3 bg-slate-100 dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700">
-                                         <label className="flex items-center gap-2 cursor-pointer select-none">
-                                            <input 
-                                                type="checkbox" 
-                                                checked={loadedFiles.length > 0 && selectedFiles.size === loadedFiles.length}
-                                                onChange={toggleAllFiles}
-                                                className="w-4 h-4 rounded text-blue-600 dark:bg-slate-900 border-slate-300 dark:border-slate-600 focus:ring-blue-500 cursor-pointer"
-                                            />
-                                            <span className="text-sm font-bold text-slate-700 dark:text-slate-200">Selecionar Tudo ({loadedFiles.length})</span>
-                                         </label>
-                                         
-                                         {selectedFiles.size > 0 && (
-                                             <button 
-                                                 onClick={handleBulkDelete}
-                                                 className="px-3 py-1.5 text-xs font-bold text-white bg-red-600 hover:bg-red-700 rounded-lg transition-colors shadow-sm flex items-center gap-2"
-                                             >
-                                                 <i className="fa-solid fa-trash"></i> Eliminar Selecionados ({selectedFiles.size})
-                                             </button>
-                                         )}
-                                     </div>
-
-                                     {/* FILE LIST */}
-                                     <div className="grid grid-cols-1 gap-2">
-                                     {loadedFiles.map((f) => {
-                                         const isSelected = selectedFiles.has(f.name);
-                                         return (
-                                         <div key={f.name} className={`flex items-center justify-between p-3 rounded-xl border transition-all ${isSelected ? 'bg-blue-50 dark:bg-blue-900/20 border-blue-300 dark:border-blue-500/50 shadow-sm' : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 hover:border-slate-300 dark:hover:border-slate-600'}`}>
-                                             <div className="flex items-center gap-3 overflow-hidden">
-                                                 <div className="pl-1">
-                                                     <input 
-                                                        type="checkbox" 
-                                                        checked={isSelected} 
-                                                        onChange={() => toggleFile(f.name)}
-                                                        className="w-4 h-4 rounded text-blue-600 dark:bg-slate-900 border-slate-300 dark:border-slate-600 focus:ring-blue-500 cursor-pointer"
-                                                     />
-                                                 </div>
-                                                 <div className="w-10 h-10 rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 flex items-center justify-center text-slate-500 dark:text-slate-400 shrink-0">
-                                                     <i className={`fa-solid ${f.name.endsWith('.pdf') ? 'fa-file-pdf text-red-500' : 'fa-file-lines'} text-lg`}></i>
-                                                 </div>
-                                                 <div className="min-w-0">
-                                                     <div className="font-bold text-slate-700 dark:text-slate-200 truncate text-sm" title={f.name}>{f.name}</div>
-                                                     <div className="text-xs text-slate-500">{f.count} registos associados</div>
-                                                 </div>
-                                             </div>
-                                             <button 
-                                                 onClick={() => onDeleteFiles([f.name])}
-                                                 className="w-8 h-8 rounded-full text-slate-400 dark:text-slate-500 hover:text-red-600 dark:hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 flex items-center justify-center transition-colors shrink-0"
-                                                 title="Eliminar este ficheiro"
-                                             >
-                                                 <i className="fa-solid fa-trash text-sm"></i>
-                                             </button>
-                                         </div>
-                                     )})}
-                                     </div>
-                                 </div>
-                             )}
+                            ) : (
+                                <form onSubmit={handleAddSingle} className="space-y-2">
+                                    <input 
+                                        type="text" 
+                                        value={newItemLabel} 
+                                        onChange={e => setNewItemLabel(e.target.value)} 
+                                        placeholder={activeTab === 'ARTICLE' ? "Ex: Artigo 14" : activeTab === 'FACT' ? "Ex: Facto 3" : "Ex: Relevante"} 
+                                        className="w-full p-2 text-sm border border-slate-300 dark:border-slate-700 rounded-lg focus:ring-2 focus:ring-blue-500 bg-white dark:bg-slate-800 dark:text-white"
+                                    />
+                                    <textarea 
+                                        value={newItemDesc} 
+                                        onChange={e => setNewItemDesc(e.target.value)} 
+                                        placeholder="Descrição (Opcional)"
+                                        className="w-full h-12 p-2 text-sm border border-slate-300 dark:border-slate-700 rounded-lg focus:ring-2 focus:ring-blue-500 bg-white dark:bg-slate-800 dark:text-white custom-scrollbar"
+                                    />
+                                    <button type="submit" className="w-full py-2 bg-blue-600 text-white rounded-lg font-bold text-sm hover:bg-blue-700 flex items-center justify-center gap-2">
+                                        <i className="fa-solid fa-plus"></i> Adicionar
+                                    </button>
+                                </form>
+                            )}
                         </div>
                     )}
-                </div>
 
-                {activeTab === 'import' && (
-                    <div className="p-4 bg-slate-50 dark:bg-slate-900 text-center text-xs text-slate-400 dark:text-slate-500 border-t border-slate-100 dark:border-slate-800">
-                        Os dados importados serão <strong>adicionados</strong> à lista existente sem apagar o que já está visível.
-                    </div>
-                )}
+                    {/* TOOLBAR */}
+                    {viewMode === 'ARCHIVED' && visibleItems.length > 0 && (
+                        <div className="flex items-center justify-between p-2 bg-slate-100 dark:bg-slate-800 rounded-lg mb-2 sticky top-0 z-10 shadow-sm border border-slate-200 dark:border-slate-700">
+                            <label className="flex items-center gap-2 cursor-pointer select-none text-xs font-bold text-slate-700 dark:text-slate-300 pl-1">
+                                <input 
+                                    type="checkbox" 
+                                    checked={visibleItems.length > 0 && selectedIds.size === visibleItems.length} 
+                                    onChange={toggleAll}
+                                    className="w-4 h-4 rounded text-blue-600 focus:ring-blue-500 border-gray-300" 
+                                />
+                                Selecionar Todos
+                            </label>
+                            
+                            <div className="flex gap-2">
+                                <button 
+                                    type="button"
+                                    onClick={handleRestoreSelected}
+                                    disabled={selectedIds.size === 0}
+                                    className="px-3 py-1 bg-white border border-green-200 dark:border-green-900/30 text-green-600 dark:text-green-400 hover:bg-green-50 dark:hover:bg-green-900/20 text-xs font-bold rounded disabled:opacity-50"
+                                >
+                                    <i className="fa-solid fa-rotate-left"></i> Restaurar
+                                </button>
+                                <button 
+                                    type="button"
+                                    onClick={handleHardDeleteSelected}
+                                    disabled={selectedIds.size === 0}
+                                    className="px-3 py-1 bg-white border border-red-200 dark:border-red-900/30 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 text-xs font-bold rounded disabled:opacity-50"
+                                >
+                                    <i className="fa-solid fa-trash"></i>
+                                </button>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* EMPTY STATE */}
+                    {visibleItems.length === 0 && (
+                        <div className="text-center text-slate-400 dark:text-slate-500 text-sm italic py-8 border-2 border-dashed border-slate-200 dark:border-slate-800 rounded-xl">
+                            {viewMode === 'ACTIVE' ? "Lista vazia." : "Arquivo vazio."}
+                        </div>
+                    )}
+                    
+                    {/* LIST */}
+                    {visibleItems.map((ref) => {
+                        const isSelected = selectedIds.has(ref.id);
+                        
+                        let rowClass = 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 opacity-90';
+                        if (viewMode === 'ARCHIVED') {
+                             rowClass += ' cursor-pointer hover:border-slate-300 dark:hover:border-slate-600';
+                             if (isSelected) rowClass = 'bg-blue-50 dark:bg-blue-900/20 border-blue-300 dark:border-blue-500 shadow-sm cursor-pointer';
+                        } else {
+                             rowClass += ' cursor-default';
+                        }
+
+                        return (
+                            <div 
+                                key={ref.id} 
+                                className={`p-3 rounded-lg border flex justify-between items-center transition-all ${rowClass}`}
+                                onClick={() => viewMode === 'ARCHIVED' && toggleSelection(ref.id)}
+                            >
+                                <div className="flex items-start gap-3 w-full">
+                                    {viewMode === 'ARCHIVED' && (
+                                        <div className="pt-0.5">
+                                            <input 
+                                                type="checkbox" 
+                                                checked={isSelected}
+                                                onChange={() => toggleSelection(ref.id)}
+                                                onClick={(e) => e.stopPropagation()}
+                                                className="w-4 h-4 rounded cursor-pointer text-blue-600 focus:ring-blue-500" 
+                                            />
+                                        </div>
+                                    )}
+                                    <div className="flex-1 min-w-0">
+                                        <div className="flex items-center justify-between">
+                                            <div className="flex items-center gap-2">
+                                                <span className={`font-bold text-sm ${getLabelColor(ref.type)}`}>
+                                                    {ref.label} 
+                                                </span>
+                                            </div>
+                                            
+                                            {/* Explicit Archive Action per Item */}
+                                            {viewMode === 'ACTIVE' && (
+                                                <button 
+                                                    onClick={(e) => handleArchiveSingle(e, ref.id)}
+                                                    className="w-6 h-6 flex items-center justify-center text-slate-300 hover:text-red-500 dark:text-slate-600 dark:hover:text-red-400 transition-colors cursor-pointer"
+                                                    title="Arquivar este item"
+                                                >
+                                                    <i className="fa-solid fa-box-archive text-xs"></i>
+                                                </button>
+                                            )}
+                                        </div>
+                                        {ref.description && <div className="text-xs text-slate-600 dark:text-slate-400 mt-1 whitespace-pre-wrap">{ref.description}</div>}
+                                    </div>
+                                </div>
+                            </div>
+                        );
+                    })}
+                </div>
             </div>
         </div>
     );
 };
 
-// --- IDENTITY MERGE MODAL ---
+// --- HELPERS & SUB-COMPONENTS ---
 
+// MultiSelectDropdown
+interface MultiSelectDropdownProps {
+  label: string;
+  placeholder: string;
+  options: string[];
+  selected: string[];
+  onChange: (selected: string[]) => void;
+}
+
+const MultiSelectDropdown: React.FC<MultiSelectDropdownProps> = ({ label, placeholder, options, selected, onChange }) => {
+  const [isOpen, setIsOpen] = useState(false);
+  const wrapperRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+      const handleClickOutside = (event: MouseEvent) => {
+          if (wrapperRef.current && !wrapperRef.current.contains(event.target as Node)) {
+              setIsOpen(false);
+          }
+      };
+      document.addEventListener("mousedown", handleClickOutside);
+      return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
+  const toggleOption = (option: string) => {
+      if (selected.includes(option)) {
+          onChange(selected.filter(s => s !== option));
+      } else {
+          onChange([...selected, option]);
+      }
+  };
+
+  return (
+    <div className="relative" ref={wrapperRef}>
+        <label className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase mb-1 block">{label}</label>
+        <div 
+            className="w-full px-3 py-2 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-md text-sm cursor-pointer flex justify-between items-center"
+            onClick={() => setIsOpen(!isOpen)}
+        >
+            <span className={`truncate ${selected.length === 0 ? 'text-slate-400' : 'text-slate-800 dark:text-slate-200'}`}>
+                {selected.length === 0 ? placeholder : `${selected.length} selecionado(s)`}
+            </span>
+            <i className={`fa-solid fa-chevron-down text-xs transition-transform ${isOpen ? 'rotate-180' : ''}`}></i>
+        </div>
+        {isOpen && (
+            <div className="absolute z-50 w-full mt-1 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg shadow-lg max-h-60 overflow-y-auto custom-scrollbar">
+                {options.length === 0 ? (
+                    <div className="p-3 text-xs text-slate-400 text-center">Sem opções</div>
+                ) : (
+                    options.map(opt => (
+                        <div 
+                            key={opt} 
+                            className="px-3 py-2 hover:bg-slate-50 dark:hover:bg-slate-700 flex items-center gap-2 cursor-pointer"
+                            onClick={() => toggleOption(opt)}
+                        >
+                            <input 
+                                type="checkbox" 
+                                checked={selected.includes(opt)} 
+                                readOnly 
+                                className="rounded text-blue-600 focus:ring-blue-500 border-gray-300"
+                            />
+                            <span className="text-sm text-slate-700 dark:text-slate-300 break-all">{opt}</span>
+                        </div>
+                    ))
+                )}
+            </div>
+        )}
+    </div>
+  );
+};
+
+// IdentityManager
 interface IdentityManagerProps {
     rawIdentities: string[];
     aliasMap: AliasMap;
@@ -218,1156 +431,940 @@ interface IdentityManagerProps {
 }
 
 const IdentityManager: React.FC<IdentityManagerProps> = ({ rawIdentities, aliasMap, onSave, onClose }) => {
-    const [selected, setSelected] = useState<string[]>([]);
-    const [targetName, setTargetName] = useState('');
+    const [localMap, setLocalMap] = useState<AliasMap>({...aliasMap});
     const [filter, setFilter] = useState('');
-    const [activeTab, setActiveTab] = useState<'names' | 'numbers'>('names');
 
-    const toggle = (id: string) => setSelected(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
-    
-    const handleMerge = () => {
-        if (!targetName.trim() || selected.length === 0) return;
-        const newMap = { ...aliasMap };
-        selected.forEach(id => newMap[id] = targetName);
-        onSave(newMap);
-        setSelected([]);
-        setTargetName('');
+    const handleChange = (original: string, alias: string) => {
+        setLocalMap(prev => ({...prev, [original]: alias}));
     };
 
-    // Helper to detect if string is mostly numeric
-    const isNumber = (str: string) => /^[\d\s\-\+\(\).]+$/.test(str);
+    const handleSave = () => {
+        onSave(localMap);
+        onClose();
+    };
 
-    const filteredIdentities = useMemo(() => {
-        return rawIdentities.filter(id => {
-            const matchesFilter = id.toLowerCase().includes(filter.toLowerCase());
-            const matchesType = activeTab === 'numbers' ? isNumber(id) : !isNumber(id);
-            return matchesFilter && matchesType;
-        });
-    }, [rawIdentities, filter, activeTab]);
+    const filteredIdentities = rawIdentities.filter(id => id.toLowerCase().includes(filter.toLowerCase()));
 
     return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 dark:bg-slate-900/80 backdrop-blur-sm p-4 animate-fade-in">
-            <div className="bg-white dark:bg-slate-900 rounded-xl shadow-2xl max-w-2xl w-full max-h-[85vh] flex flex-col border border-transparent dark:border-slate-800">
-                <div className="p-4 border-b border-slate-100 dark:border-slate-800 flex justify-between items-center">
-                    <h3 className="font-bold text-lg text-slate-800 dark:text-white">Gerir Identidades (Unificar)</h3>
-                    <button onClick={onClose}><i className="fa-solid fa-xmark text-slate-400 hover:text-slate-600 dark:hover:text-white"></i></button>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 dark:bg-slate-950/80 backdrop-blur-sm p-4 animate-fade-in">
+             <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl max-w-2xl w-full max-h-[80vh] flex flex-col border border-transparent dark:border-slate-800">
+                <div className="p-5 border-b border-slate-100 dark:border-slate-800 flex justify-between items-center">
+                    <h3 className="text-xl font-bold text-slate-800 dark:text-white">Gestão de Identidades</h3>
+                    <button onClick={onClose}><i className="fa-solid fa-xmark text-xl text-slate-400"></i></button>
                 </div>
-                
-                {/* Tabs */}
-                <div className="flex border-b border-slate-200 dark:border-slate-800">
-                    <button 
-                        onClick={() => { setActiveTab('names'); setSelected([]); }}
-                        className={`flex-1 py-3 text-sm font-bold text-center transition-colors ${activeTab === 'names' ? 'border-b-2 border-blue-600 dark:border-blue-500 text-blue-600 dark:text-blue-400 bg-blue-50/50 dark:bg-slate-800/50' : 'text-slate-500 dark:text-slate-500 hover:bg-slate-50 dark:hover:bg-slate-800'}`}
-                    >
-                        <i className="fa-solid fa-user-tag mr-2"></i>Intervenientes
-                    </button>
-                    <button 
-                        onClick={() => { setActiveTab('numbers'); setSelected([]); }}
-                        className={`flex-1 py-3 text-sm font-bold text-center transition-colors ${activeTab === 'numbers' ? 'border-b-2 border-blue-600 dark:border-blue-500 text-blue-600 dark:text-blue-400 bg-blue-50/50 dark:bg-slate-800/50' : 'text-slate-500 dark:text-slate-500 hover:bg-slate-50 dark:hover:bg-slate-800'}`}
-                    >
-                        <i className="fa-solid fa-hashtag mr-2"></i>Números
-                    </button>
+                <div className="p-4 border-b border-slate-100 dark:border-slate-800">
+                    <input 
+                        type="text" 
+                        placeholder="Filtrar identidades..." 
+                        value={filter} 
+                        onChange={e => setFilter(e.target.value)}
+                        className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-sm"
+                    />
                 </div>
-
-                <div className="p-4 bg-slate-100 dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700 flex gap-2 items-end">
-                    <div className="flex-1">
-                        <label className="text-xs font-bold text-slate-600 dark:text-slate-400 uppercase mb-1 block">Novo Nome/Número Unificado</label>
-                        <input 
-                            type="text" 
-                            value={targetName} 
-                            onChange={e => setTargetName(e.target.value)} 
-                            placeholder={activeTab === 'names' ? "Ex: André Magalhães" : "Ex: 910000000"} 
-                            className="w-full px-3 py-2 rounded border border-slate-300 dark:border-slate-600 text-sm bg-white dark:bg-slate-900 text-slate-900 dark:text-white focus:ring-2 focus:ring-blue-500 outline-none" 
-                        />
-                    </div>
-                    <button onClick={handleMerge} disabled={selected.length === 0 || !targetName} className="px-4 py-2 bg-blue-600 text-white rounded font-bold text-sm hover:bg-blue-700 disabled:opacity-50 shadow-sm h-[38px]">
-                        Unificar ({selected.length})
-                    </button>
-                </div>
-                <div className="p-2 border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900">
-                    <input type="text" value={filter} onChange={e => setFilter(e.target.value)} placeholder="Filtrar lista..." className="w-full px-3 py-1.5 text-sm bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded text-slate-700 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-500 focus:outline-none focus:border-blue-500" />
-                </div>
-                <div className="flex-1 overflow-y-auto p-2 custom-scrollbar grid grid-cols-1 sm:grid-cols-2 gap-2 bg-slate-50 dark:bg-slate-900">
-                    {filteredIdentities.length === 0 && <div className="col-span-2 text-center py-8 text-slate-400 dark:text-slate-500 text-sm">Nenhum item encontrado.</div>}
-                    {filteredIdentities.map(id => {
-                        const alias = aliasMap[id];
-                        return (
-                        <div key={id} onClick={() => toggle(id)} className={`p-2 rounded border cursor-pointer text-sm flex justify-between items-center ${selected.includes(id) ? 'bg-blue-100 dark:bg-blue-900/30 border-blue-300 dark:border-blue-500' : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 hover:border-blue-300 dark:hover:border-slate-500'}`}>
-                            <div className="truncate pr-2">
-                                <div className="font-medium text-slate-700 dark:text-slate-200">{id}</div>
-                                {alias && <div className="text-[10px] text-green-600 dark:text-green-400 font-bold flex items-center gap-1"><i className="fa-solid fa-arrow-right"></i> {alias}</div>}
+                <div className="flex-1 overflow-y-auto p-4 custom-scrollbar space-y-3">
+                    {filteredIdentities.map(original => (
+                        <div key={original} className="flex items-center gap-3">
+                            <div className="w-1/2 text-sm font-mono text-slate-600 dark:text-slate-400 truncate" title={original}>{original}</div>
+                            <div className="w-1/2">
+                                <input 
+                                    type="text" 
+                                    value={localMap[original] || ''} 
+                                    placeholder="Alias / Nome Real" 
+                                    onChange={e => handleChange(original, e.target.value)}
+                                    className="w-full px-3 py-1.5 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded text-sm focus:ring-2 focus:ring-blue-500"
+                                />
                             </div>
-                            {selected.includes(id) && <i className="fa-solid fa-check text-blue-600 dark:text-blue-500"></i>}
                         </div>
-                    )})}
+                    ))}
                 </div>
-                <div className="p-4 border-t border-slate-100 dark:border-slate-800 flex justify-end bg-white dark:bg-slate-900 rounded-b-xl">
-                    <button onClick={onClose} className="px-4 py-2 bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 rounded font-medium hover:bg-slate-200 dark:hover:bg-slate-700">Fechar</button>
+                <div className="p-5 border-t border-slate-100 dark:border-slate-800 flex justify-end gap-3 bg-slate-50 dark:bg-slate-900 rounded-b-2xl">
+                    <button onClick={onClose} className="px-4 py-2 text-slate-600 hover:text-slate-800 dark:text-slate-400 dark:hover:text-white font-bold text-sm">Cancelar</button>
+                    <button onClick={handleSave} className="px-6 py-2 bg-blue-600 text-white rounded-lg font-bold text-sm hover:bg-blue-700">Guardar Alterações</button>
                 </div>
-            </div>
+             </div>
         </div>
     );
 };
 
-// --- SEARCH LOGIC HELPERS ---
+// ImportModal
+interface ImportModalProps {
+    onClose: () => void;
+    onImport: (e: React.ChangeEvent<HTMLInputElement>) => void;
+    sessions: ParsedSession[];
+    onDeleteFiles: (fileNames: string[]) => void;
+}
 
-const normalizeText = (text: string): string => {
-  return text
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "");
-};
-
-const getLevenshteinDistance = (a: string, b: string): number => {
-  if (a.length === 0) return b.length;
-  if (b.length === 0) return a.length;
-
-  const matrix = Array(b.length + 1).fill(null).map(() => Array(a.length + 1).fill(null));
-  for (let i = 0; i <= a.length; i += 1) matrix[0][i] = i;
-  for (let j = 0; j <= b.length; j += 1) matrix[j][0] = j;
-
-  for (let j = 1; j <= b.length; j += 1) {
-    for (let i = 1; i <= a.length; i += 1) {
-      const indicator = a[i - 1] === b[j - 1] ? 0 : 1;
-      matrix[j][i] = Math.min(
-        matrix[j][i - 1] + 1, 
-        matrix[j - 1][i] + 1, 
-        matrix[j - 1][i - 1] + indicator 
-      );
-    }
-  }
-  return matrix[b.length][a.length];
-};
-
-const matchTerm = (contentNormalized: string, term: string): boolean => {
-  const termNorm = normalizeText(term);
-  if (contentNormalized.includes(termNorm)) return true;
-  if (termNorm.length > 3 && !termNorm.includes(' ')) {
-      const words = contentNormalized.split(/\W+/);
-      const threshold = termNorm.length <= 5 ? 1 : 2;
-      for (const word of words) {
-          if (Math.abs(word.length - termNorm.length) > threshold) continue;
-          if (getLevenshteinDistance(word, termNorm) <= threshold) return true;
-      }
-  }
-  return false;
-};
-
-const evaluateBooleanQuery = (content: string, query: string): boolean => {
-  if (!query.trim()) return true;
-  const normalizedContent = normalizeText(content);
-  const regex = /"([^"]+)"|(\(|\)|OR|AND|NOT|\+|\-)|([^\s\(\)"\+\-]+)/gi;
-  const tokens = [];
-  let match;
-  while ((match = regex.exec(query)) !== null) {
-      if (match[1]) tokens.push({ type: 'TERM', value: match[1] });
-      else if (match[2]) tokens.push({ type: 'OP', value: match[2].toUpperCase() });
-      else if (match[3]) tokens.push({ type: 'TERM', value: match[3] });
-  }
-  const outputQueue = [];
-  const operatorStack = [];
-  const precedence: Record<string, number> = { 'NOT': 3, '-': 3, 'AND': 2, '+': 2, 'OR': 1, '(': 0 };
-
-  for (const token of tokens) {
-      if (token.type === 'TERM') {
-          outputQueue.push(token);
-      } else if (token.type === 'OP') {
-          if (token.value === '(') {
-              operatorStack.push(token.value);
-          } else if (token.value === ')') {
-              while (operatorStack.length > 0 && operatorStack[operatorStack.length - 1] !== '(') {
-                  outputQueue.push({ type: 'OP', value: operatorStack.pop() });
-              }
-              operatorStack.pop();
-          } else {
-              while (
-                  operatorStack.length > 0 &&
-                  precedence[operatorStack[operatorStack.length - 1]] >= precedence[token.value]
-              ) {
-                  outputQueue.push({ type: 'OP', value: operatorStack.pop() });
-              }
-              operatorStack.push(token.value);
-          }
-      }
-  }
-  while (operatorStack.length > 0) outputQueue.push({ type: 'OP', value: operatorStack.pop() });
-
-  const evalStack: boolean[] = [];
-  for (const token of outputQueue) {
-      if (token.type === 'TERM') {
-          evalStack.push(matchTerm(normalizedContent, token.value as string));
-      } else {
-          const op = token.value;
-          if (op === 'NOT' || op === '-') {
-              const a = evalStack.pop();
-              evalStack.push(!a);
-          } else {
-              const b = evalStack.pop() || false;
-              const a = evalStack.pop() || false;
-              if (op === 'AND' || op === '+') evalStack.push(a && b);
-              else if (op === 'OR') evalStack.push(a || b);
-          }
-      }
-  }
-  return evalStack.length > 0 ? evalStack[0] : false;
-};
-
-// --- DURATION HELPER ---
-const parseDurationToSeconds = (dur: string | undefined): number => {
-    if (!dur) return 0;
-    // Expected format HH:mm:ss or mm:ss
-    const parts = dur.split(':').map(Number);
-    if (parts.length === 3) {
-        return parts[0] * 3600 + parts[1] * 60 + parts[2];
-    } else if (parts.length === 2) {
-        return parts[0] * 60 + parts[1];
-    }
-    return 0;
-};
-
-// --- MULTI-SELECT ---
-const MultiSelectDropdown: React.FC<{
-    label: string;
-    options: string[];
-    selected: string[];
-    onChange: (selected: string[]) => void;
-    placeholder?: string;
-}> = ({ label, options, selected, onChange, placeholder }) => {
-    const [isOpen, setIsOpen] = useState(false);
-    const [search, setSearch] = useState('');
-    const dropdownRef = useRef<HTMLDivElement>(null);
-
-    useEffect(() => {
-        const handleClickOutside = (event: MouseEvent) => {
-            if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) setIsOpen(false);
-        };
-        document.addEventListener("mousedown", handleClickOutside);
-        return () => document.removeEventListener("mousedown", handleClickOutside);
-    }, []);
-
-    const filteredOptions = options.filter(opt => opt.toLowerCase().includes(search.toLowerCase()));
-    const toggleOption = (opt: string) => selected.includes(opt) ? onChange(selected.filter(s => s !== opt)) : onChange([...selected, opt]);
+const ImportModal: React.FC<ImportModalProps> = ({ onClose, onImport, sessions, onDeleteFiles }) => {
+    // Unique source files
+    const uniqueFiles = useMemo(() => Array.from(new Set(sessions.map(s => s.sourceFileName))), [sessions]);
 
     return (
-        <div className="relative" ref={dropdownRef}>
-            <label className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-1 block">{label}</label>
-            <button onClick={() => setIsOpen(!isOpen)} className="w-full px-3 py-2 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-md text-sm text-left flex justify-between items-center focus:ring-2 focus:ring-blue-500 text-slate-700 dark:text-slate-200 hover:border-slate-400 dark:hover:border-slate-600">
-                <span className="truncate">{selected.length === 0 ? (placeholder || 'Todos') : `${selected.length} selecionado(s)`}</span>
-                <i className={`fa-solid fa-chevron-down text-xs text-slate-400 dark:text-slate-500 transition-transform ${isOpen ? 'rotate-180' : ''}`}></i>
-            </button>
-            {isOpen && (
-                <div className="absolute z-50 w-full mt-1 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg shadow-xl max-h-60 flex flex-col">
-                    <div className="p-2 border-b border-slate-100 dark:border-slate-700">
-                        <div className="relative"><i className="fa-solid fa-magnifying-glass absolute left-2 top-2 text-slate-300 dark:text-slate-500 text-xs"></i>
-                            <input type="text" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Filtrar..." className="w-full pl-7 pr-2 py-1 bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-200 border border-slate-200 dark:border-slate-700 rounded text-xs focus:outline-none" autoFocus />
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 dark:bg-slate-950/80 backdrop-blur-sm p-4 animate-fade-in">
+             <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl max-w-lg w-full overflow-hidden border border-transparent dark:border-slate-800">
+                <div className="p-5 border-b border-slate-100 dark:border-slate-800 flex justify-between items-center">
+                    <h3 className="text-lg font-bold text-slate-800 dark:text-white">Importar / Gerir Ficheiros</h3>
+                    <button onClick={onClose}><i className="fa-solid fa-xmark text-xl text-slate-400"></i></button>
+                </div>
+                <div className="p-6 space-y-6">
+                    <div>
+                        <h4 className="font-bold text-sm text-slate-700 dark:text-slate-300 mb-2">Adicionar Novos Ficheiros</h4>
+                        <label className="flex flex-col items-center justify-center w-full h-32 border-2 border-dashed border-slate-300 dark:border-slate-700 rounded-xl cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors">
+                            <div className="flex flex-col items-center justify-center pt-5 pb-6">
+                                <i className="fa-solid fa-cloud-arrow-up text-3xl text-slate-400 mb-3"></i>
+                                <p className="text-sm text-slate-500 dark:text-slate-400"><span className="font-semibold">Clique para carregar</span> ou arraste</p>
+                                <p className="text-xs text-slate-400 dark:text-slate-500 mt-1">PDF, ZIP, ou Pasta</p>
+                            </div>
+                            <input type="file" className="hidden" multiple accept=".pdf,.zip" onChange={(e) => { onImport(e); onClose(); }} />
+                        </label>
+                    </div>
+
+                    <div>
+                        <h4 className="font-bold text-sm text-slate-700 dark:text-slate-300 mb-2">Ficheiros Carregados ({uniqueFiles.length})</h4>
+                        <div className="max-h-40 overflow-y-auto custom-scrollbar border border-slate-200 dark:border-slate-700 rounded-lg">
+                            {uniqueFiles.length === 0 ? (
+                                <div className="p-4 text-center text-xs text-slate-400">Nenhum ficheiro carregado.</div>
+                            ) : (
+                                uniqueFiles.map(file => (
+                                    <div key={file} className="flex justify-between items-center p-3 border-b border-slate-100 dark:border-slate-700 last:border-0 hover:bg-slate-50 dark:hover:bg-slate-800">
+                                        <div className="flex items-center gap-2 truncate">
+                                            <i className="fa-regular fa-file-pdf text-red-500"></i>
+                                            <span className="text-xs font-medium text-slate-700 dark:text-slate-300 truncate max-w-[200px]" title={file}>{file}</span>
+                                        </div>
+                                        <button onClick={() => onDeleteFiles([file])} className="text-slate-400 hover:text-red-500 transition-colors">
+                                            <i className="fa-solid fa-trash text-xs"></i>
+                                        </button>
+                                    </div>
+                                ))
+                            )}
                         </div>
                     </div>
-                    <div className="overflow-y-auto flex-1 p-1 custom-scrollbar">
-                        {filteredOptions.length === 0 && <div className="p-2 text-xs text-slate-400 dark:text-slate-500 text-center">Nada encontrado</div>}
-                        {filteredOptions.map(opt => (
-                            <label key={opt} className="flex items-center gap-2 px-2 py-1.5 hover:bg-blue-50 dark:hover:bg-slate-700 rounded cursor-pointer group">
-                                <input type="checkbox" checked={selected.includes(opt)} onChange={() => toggleOption(opt)} className="rounded border-slate-300 dark:border-slate-600 text-blue-600 bg-white dark:bg-slate-900 accent-blue-600 focus:ring-blue-500" />
-                                <span className="text-sm text-slate-700 dark:text-slate-300 group-hover:text-blue-700 dark:group-hover:text-white truncate" title={opt}>{opt}</span>
-                            </label>
-                        ))}
-                    </div>
-                    {selected.length > 0 && <button onClick={() => onChange([])} className="p-2 text-xs text-center text-red-500 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 font-medium border-t border-slate-100 dark:border-slate-700">Limpar Seleção</button>}
                 </div>
-            )}
+             </div>
         </div>
     );
 };
 
 // --- MAIN EXPLORER COMPONENT ---
 
-type SortOption = 'date_desc' | 'date_asc' | 'source_num' | 'dest_num' | 'source_name' | 'dest_name' | 'duration_desc';
-
-const Explorer: React.FC<ExplorerProps> = ({ sessions, onBack, onImport, onGetAsset, savedTags, setSavedTags, aliasMap, setAliasMap, onSaveProject, onDeleteSessions, onDeleteFiles }) => {
-  const [inputSession, setInputSession] = useState('');
-  const [inputContent, setInputContent] = useState('');
-  const [inputDateStart, setInputDateStart] = useState('');
-  const [inputDateEnd, setInputDateEnd] = useState('');
-  const [inputTimeStart, setInputTimeStart] = useState('');
-  const [inputTimeEnd, setInputTimeEnd] = useState('');
-  const [inputMinDuration, setInputMinDuration] = useState(''); // Min seconds
-  const [inputMaxDuration, setInputMaxDuration] = useState(''); // Max seconds
+interface ExplorerProps {
+  sessions: ParsedSession[];
+  setSessions: React.Dispatch<React.SetStateAction<ParsedSession[]>>;
+  onBack: () => void;
+  onImport: (e: React.ChangeEvent<HTMLInputElement>) => void;
+  onGetAsset: (session: ParsedSession, type: 'pdf' | 'docx') => Promise<string | null>;
   
-  // Specific Filters for Source/Dest
-  const [filterSourceNumbers, setFilterSourceNumbers] = useState<string[]>([]);
-  const [filterDestNumbers, setFilterDestNumbers] = useState<string[]>([]);
-  const [filterSourceSpeakers, setFilterSourceSpeakers] = useState<string[]>([]);
-  const [filterDestSpeakers, setFilterDestSpeakers] = useState<string[]>([]);
+  savedTags: SavedTag[];
+  setSavedTags: React.Dispatch<React.SetStateAction<SavedTag[]>>;
+  aliasMap: AliasMap;
+  setAliasMap: React.Dispatch<React.SetStateAction<AliasMap>>;
+  legalReferences: LegalReference[];
+  setLegalReferences: React.Dispatch<React.SetStateAction<LegalReference[]>>;
   
-  // Selection States
-  const [manualSelection, setManualSelection] = useState<Set<string>>(new Set());
-  const [viewOnlySelected, setViewOnlySelected] = useState(false);
+  onSaveProject: () => void;
+  onDeleteSessions: (sessionIds: string[]) => void;
+  onDeleteFiles: (fileNames: string[]) => void;
+  onExportSessions?: (sessions: ParsedSession[]) => void;
+}
 
-  // Sorting State
-  const [sortOption, setSortOption] = useState<SortOption>('date_desc');
+type SortOption = 'date_desc' | 'date_asc' | 'duration_desc' | 'source_num' | 'dest_num' | 'source_name' | 'dest_name';
 
-  // Saved Tags System
-  const [tagName, setTagName] = useState('');
-  const [activeTagIds, setActiveTagIds] = useState<string[]>([]);
-  
-  // Tag Editing State
-  const [editingTagId, setEditingTagId] = useState<string | null>(null);
-  const [editTagName, setEditTagName] = useState('');
+const Explorer: React.FC<ExplorerProps> = ({ 
+    sessions, setSessions, onBack, onImport, onGetAsset, 
+    savedTags, setSavedTags, aliasMap, setAliasMap, 
+    legalReferences, setLegalReferences, 
+    onSaveProject, onDeleteSessions, onDeleteFiles, onExportSessions 
+}) => {
+    // --- STATE ---
+    // UI Toggles
+    const [showAliasModal, setShowAliasModal] = useState(false);
+    const [showImportModal, setShowImportModal] = useState(false);
+    const [showLegalModal, setShowLegalModal] = useState(false);
+    const [isAdvancedSearchOpen, setIsAdvancedSearchOpen] = useState(false);
+    const [loadingPdf, setLoadingPdf] = useState<string | null>(null);
+    const [copiedId, setCopiedId] = useState<string | null>(null);
 
-  // Modals
-  const [showAliasModal, setShowAliasModal] = useState(false);
-  const [showImportModal, setShowImportModal] = useState(false);
-
-  const [activeFilters, setActiveFilters] = useState({
-    session: '', content: '', dateStart: '', dateEnd: '', timeStart: '', timeEnd: '', 
-    sourceNumbers: [] as string[], destNumbers: [] as string[], 
-    sourceSpeakers: [] as string[], destSpeakers: [] as string[],
-    minDuration: '', maxDuration: ''
-  });
-  
-  const [loadingPdf, setLoadingPdf] = useState<string | null>(null);
-  const [isExporting, setIsExporting] = useState(false);
-  const [copiedId, setCopiedId] = useState<string | null>(null);
-
-  // Helper to resolve alias
-  const resolve = (val: string | undefined): string | undefined => {
-      if (!val) return undefined;
-      return aliasMap[val] || val;
-  };
-
-  // --- AGGREGATE DROPDOWN DATA ---
-  const { allNumbers, allSpeakers, rawIdentities } = useMemo(() => {
-      const numbers = new Set<string>();
-      const speakers = new Set<string>();
-      const rawSet = new Set<string>();
-
-      sessions.forEach(s => {
-          if (s.target) {
-              const val = s.target;
-              rawSet.add(val);
-              numbers.add(resolve(val)!);
-          }
-          if (s.sourceNumber) {
-              rawSet.add(s.sourceNumber);
-              numbers.add(resolve(s.sourceNumber)!);
-          }
-          if (s.destinationNumber) {
-              rawSet.add(s.destinationNumber);
-              numbers.add(resolve(s.destinationNumber)!);
-          }
-
-          if (s.sourceName) {
-              rawSet.add(s.sourceName);
-              speakers.add(resolve(s.sourceName)!);
-          }
-          if (s.destinationName) {
-              rawSet.add(s.destinationName);
-              speakers.add(resolve(s.destinationName)!);
-          }
-          
-          // Fallback regex scan for speakers in text
-          const lines = s.content.split('\n');
-          lines.forEach(line => {
-             const match = line.match(/^([A-ZÀ-Ú][a-zà-ú0-9_\-\s]{1,30}):/);
-             if (match) {
-                 const name = match[1].trim();
-                 rawSet.add(name);
-                 speakers.add(resolve(name)!);
-             }
-          });
-      });
-
-      return {
-          allNumbers: Array.from(numbers).sort(),
-          allSpeakers: Array.from(speakers).sort(),
-          rawIdentities: Array.from(rawSet).sort()
-      };
-  }, [sessions, aliasMap]);
-
-
-  const handleSearch = () => {
-    setActiveFilters({
-        session: inputSession, content: inputContent, dateStart: inputDateStart, dateEnd: inputDateEnd, timeStart: inputTimeStart, timeEnd: inputTimeEnd, 
-        sourceNumbers: filterSourceNumbers, destNumbers: filterDestNumbers,
-        sourceSpeakers: filterSourceSpeakers, destSpeakers: filterDestSpeakers,
-        minDuration: inputMinDuration, maxDuration: inputMaxDuration
-    });
-  };
-
-  const handleClearFilters = () => {
-      setInputSession(''); setInputContent(''); setInputDateStart(''); setInputDateEnd(''); setInputTimeStart(''); setInputTimeEnd(''); setInputMinDuration(''); setInputMaxDuration('');
-      
-      setFilterSourceNumbers([]); setFilterDestNumbers([]);
-      setFilterSourceSpeakers([]); setFilterDestSpeakers([]);
-      
-      setManualSelection(new Set()); setViewOnlySelected(false);
-      // Clear Active Tags as well
-      setActiveTagIds([]);
-      setActiveFilters({ session: '', content: '', dateStart: '', dateEnd: '', timeStart: '', timeEnd: '', sourceNumbers: [], destNumbers: [], sourceSpeakers: [], destSpeakers: [], minDuration: '', maxDuration: '' });
-  };
-
-  const parseDate = (dateStr: string) => {
-    const parts = dateStr.split('.');
-    return parts.length === 3 ? new Date(parseInt(parts[2]), parseInt(parts[1]) - 1, parseInt(parts[0])) : null;
-  };
-
-  const isTimeInRange = (time: string | undefined, start: string, end: string) => {
-    if (!time) return false;
-    const t = time.substring(0, 5); 
-    if (start && end) return start <= end ? (t >= start && t <= end) : (t >= start || t <= end);
-    if (start) return t >= start;
-    if (end) return t <= end;
-    return true;
-  };
-
-  const filteredSessions = useMemo(() => {
-    const { session: sessionF, content, dateStart, dateEnd, timeStart, timeEnd, sourceNumbers, destNumbers, sourceSpeakers, destSpeakers, minDuration, maxDuration } = activeFilters;
-    let baseSet = sessions;
+    // Filter Inputs
+    const [inputSession, setInputSession] = useState('');
+    const [inputContent, setInputContent] = useState('');
+    const [inputDateStart, setInputDateStart] = useState('');
+    const [inputDateEnd, setInputDateEnd] = useState('');
+    const [inputTimeStart, setInputTimeStart] = useState('');
+    const [inputTimeEnd, setInputTimeEnd] = useState('');
     
-    // 1. Context (Tag) Filter
-    if (activeTagIds.length > 0) {
-        const allowedIds = new Set<string>();
-        savedTags.filter(t => activeTagIds.includes(t.id)).forEach(t => {
-            t.sessionIds.forEach(id => allowedIds.add(id));
-        });
-        baseSet = sessions.filter(s => allowedIds.has(s.sessionId));
-    }
+    // MultiSelect Filter Inputs
+    const [filterSourceNumbers, setFilterSourceNumbers] = useState<string[]>([]);
+    const [filterDestNumbers, setFilterDestNumbers] = useState<string[]>([]);
+    const [filterSourceSpeakers, setFilterSourceSpeakers] = useState<string[]>([]);
+    const [filterDestSpeakers, setFilterDestSpeakers] = useState<string[]>([]);
+    const [filterLegalArticle, setFilterLegalArticle] = useState<string[]>([]);
+    const [filterLegalFact, setFilterLegalFact] = useState<string[]>([]);
+    const [filterLegalTag, setFilterLegalTag] = useState<string[]>([]);
 
-    // 2. View Only Selected Filter
-    if (viewOnlySelected) {
-        baseSet = baseSet.filter(s => manualSelection.has(s.sessionId));
-    }
+    const [inputMinDuration, setInputMinDuration] = useState('');
+    const [inputMaxDuration, setInputMaxDuration] = useState('');
 
-    return baseSet.filter(s => {
-      // Duration Filter (Min, Max, or Interval)
-      if (minDuration || maxDuration) {
-          if (s.type !== 'AUDIO') return false; // Exclude SMS if duration filter is active
-          const durationSec = parseDurationToSeconds(s.duration);
-          
-          if (minDuration) {
-             const minS = parseInt(minDuration, 10);
-             if (!isNaN(minS) && durationSec < minS) return false;
-          }
-          if (maxDuration) {
-             const maxS = parseInt(maxDuration, 10);
-             if (!isNaN(maxS) && durationSec > maxS) return false;
-          }
-      }
-
-      // --- DIRECTIONAL NUMBER FILTER (AND logic between Source/Dest) ---
-      // If Source Numbers are selected, session MUST have a source matching one of them.
-      if (sourceNumbers.length > 0) {
-          const sNum = resolve(s.sourceNumber);
-          if (!sNum || !sourceNumbers.includes(sNum)) return false;
-      }
-      
-      // If Dest Numbers are selected, session MUST have a dest matching one of them.
-      if (destNumbers.length > 0) {
-          const dNum = resolve(s.destinationNumber);
-          if (!dNum || !destNumbers.includes(dNum)) return false;
-      }
-
-      // --- DIRECTIONAL SPEAKER FILTER (AND logic between Source/Dest) ---
-      if (sourceSpeakers.length > 0) {
-          const sName = resolve(s.sourceName);
-          // Fallback: Check if source number is aliased to a selected speaker name
-          const sNumAsName = resolve(s.sourceNumber);
-          
-          const matchName = sName && sourceSpeakers.includes(sName);
-          const matchNum = sNumAsName && sourceSpeakers.includes(sNumAsName);
-          
-          // Also check Regex Content extraction for Speakers (for old parsing style)
-          let contentMatch = false;
-          if (!matchName && !matchNum) {
-             const firstLine = s.content.split('\n')[0] || "";
-             const match = firstLine.match(/^([A-ZÀ-Ú][a-zà-ú0-9_\-\s]{1,30}):/);
-             if (match) {
-                 const extracted = match[1].trim();
-                 if (sourceSpeakers.includes(resolve(extracted)!)) contentMatch = true;
-             }
-          }
-
-          if (!matchName && !matchNum && !contentMatch) return false;
-      }
-
-      if (destSpeakers.length > 0) {
-          const dName = resolve(s.destinationName);
-          const dNumAsName = resolve(s.destinationNumber);
-          
-          const matchName = dName && destSpeakers.includes(dName);
-          const matchNum = dNumAsName && destSpeakers.includes(dNumAsName);
-          
-          if (!matchName && !matchNum) return false;
-      }
-      
-      if (sessionF && !sessionF.split(',').some(t => s.sessionId.toLowerCase().includes(t.trim().toLowerCase()))) return false;
-      if (content && !evaluateBooleanQuery(s.content, content)) return false;
-
-      if (dateStart || dateEnd) {
-        const d = parseDate(s.date);
-        if (d && ((dateStart && d < new Date(dateStart)) || (dateEnd && d > new Date(dateEnd)))) return false;
-      }
-      if ((timeStart || timeEnd) && s.startTime && !isTimeInRange(s.startTime, timeStart, timeEnd)) return false;
-
-      return true;
+    // Active Filters (Applied on Search Click)
+    const [activeFilters, setActiveFilters] = useState({
+        session: '', content: '', dateStart: '', dateEnd: '', timeStart: '', timeEnd: '',
+        sourceNumbers: [] as string[], destNumbers: [] as string[],
+        sourceSpeakers: [] as string[], destSpeakers: [] as string[],
+        minDuration: '', maxDuration: '',
+        legalArticle: [] as string[], legalFact: [] as string[], legalTag: [] as string[]
     });
-  }, [sessions, activeFilters, activeTagIds, savedTags, viewOnlySelected, manualSelection, aliasMap, rawIdentities]);
 
-  // --- SORTING LOGIC ---
-  const sortedSessions = useMemo(() => {
-      const data = [...filteredSessions];
-      data.sort((a, b) => {
-          switch(sortOption) {
-              case 'date_desc':
-                  return (parseDate(b.date)?.getTime() || 0) - (parseDate(a.date)?.getTime() || 0);
-              case 'date_asc':
-                  return (parseDate(a.date)?.getTime() || 0) - (parseDate(b.date)?.getTime() || 0);
-              case 'duration_desc':
-                  return parseDurationToSeconds(b.duration) - parseDurationToSeconds(a.duration);
-              case 'source_num':
-                  return (resolve(a.sourceNumber) || '').localeCompare(resolve(b.sourceNumber) || '');
-              case 'dest_num':
-                  return (resolve(a.destinationNumber) || '').localeCompare(resolve(b.destinationNumber) || '');
-              case 'source_name':
-                  return (resolve(a.sourceName) || resolve(a.sourceNumber) || '').localeCompare(resolve(b.sourceName) || resolve(b.sourceNumber) || '');
-              case 'dest_name':
-                  return (resolve(a.destinationName) || resolve(a.destinationNumber) || '').localeCompare(resolve(b.destinationName) || resolve(b.destinationNumber) || '');
-              default:
-                  return 0;
-          }
-      });
-      return data;
-  }, [filteredSessions, sortOption, aliasMap]);
+    // Selection & Tags
+    const [manualSelection, setManualSelection] = useState<Set<string>>(new Set());
+    const [activeTagIds, setActiveTagIds] = useState<string[]>([]);
+    const [tagName, setTagName] = useState('');
+    const [viewOnlySelected, setViewOnlySelected] = useState(false);
+    
+    // Tag Editing
+    const [editingTagId, setEditingTagId] = useState<string | null>(null);
+    const [editTagName, setEditTagName] = useState('');
 
+    // Sorting
+    const [sortOption, setSortOption] = useState<SortOption>('date_desc');
 
-  const saveTag = () => {
-      if (!tagName.trim()) return alert("Dê um nome à etiqueta.");
-      const idsToSave = manualSelection.size > 0 ? Array.from(manualSelection) : sortedSessions.map(s => s.sessionId);
-      const desc = manualSelection.size > 0 ? `${idsToSave.length} itens (Seleção)` : `${idsToSave.length} itens (Filtro)`;
-      
-      const newTag: SavedTag = {
-          id: Date.now().toString(),
-          name: tagName,
-          timestamp: Date.now(),
-          sessionIds: idsToSave,
-          filterDescription: desc
-      };
-      setSavedTags(prev => [newTag, ...prev]);
-      setTagName(''); 
-  };
+    // Legal Linking (Temporary Selection in Widget)
+    const [selectedArticlesToLink, setSelectedArticlesToLink] = useState<string[]>([]);
+    const [selectedFactsToLink, setSelectedFactsToLink] = useState<string[]>([]);
+    const [selectedTagsToLink, setSelectedTagsToLink] = useState<string[]>([]);
 
-  const deleteTag = (e: React.MouseEvent, id: string) => {
-      e.stopPropagation();
-      if (confirm("Tem a certeza que deseja eliminar esta etiqueta?")) {
-          setSavedTags(prev => prev.filter(t => t.id !== id));
-          if (activeTagIds.includes(id)) {
-              setActiveTagIds(prev => prev.filter(tid => tid !== id));
-          }
-      }
-  };
+    // Exporting Loading State
+    const [isExporting, setIsExporting] = useState(false);
 
-  // --- TAG EDITING HANDLERS ---
-  const startEditingTag = (e: React.MouseEvent, tag: SavedTag) => {
-      e.stopPropagation();
-      setEditingTagId(tag.id);
-      setEditTagName(tag.name);
-  };
+    // Helper: Resolve Alias
+    const resolve = useCallback((val: string | undefined): string | undefined => {
+        if (!val) return undefined;
+        return aliasMap[val] || val;
+    }, [aliasMap]);
 
-  const saveEditedTag = (e: React.MouseEvent) => {
-      e.stopPropagation();
-      if (!editTagName.trim()) return;
-      setSavedTags(prev => prev.map(t => t.id === editingTagId ? { ...t, name: editTagName } : t));
-      setEditingTagId(null);
-      setEditTagName('');
-  };
-
-  const cancelEditingTag = (e: React.MouseEvent) => {
-      e.stopPropagation();
-      setEditingTagId(null);
-      setEditTagName('');
-  };
-
-  const toggleTag = (id: string) => {
-      if (editingTagId === id) return; // Prevent toggling while editing
-      setActiveTagIds(prev => prev.includes(id) ? prev.filter(t => t !== id) : [...prev, id]);
-  };
-
-  // --- REUSABLE EXPORT FUNCTION ---
-  const exportSessionsToDocx = async (sessionsToExport: ParsedSession[], prefix: string) => {
-      if (sessionsToExport.length === 0) return alert("Nada para exportar.");
-      setIsExporting(true);
-      
-      try {
-          const docChildren: Paragraph[] = [];
-          
-          sessionsToExport.forEach((session, idx) => {
-              // Header for Session
-              const timeInfo = [
-                session.startTime ? `Início: ${session.startTime}` : '',
-                session.endTime ? `Fim: ${session.endTime}` : '',
-                session.duration ? `Duração: ${session.duration}` : ''
-              ].filter(Boolean).join('  |  ');
-
-              const sourceStr = resolve(session.sourceName) || resolve(session.sourceNumber) || session.sourceNumber || "N/D";
-              const destStr = resolve(session.destinationName) || resolve(session.destinationNumber) || session.destinationNumber || "N/D";
-
-              docChildren.push(
-                new Paragraph({
-                  text: `SESSÃO: ${session.sessionId}  (ID Alvo: ${session.target})`,
-                  heading: HeadingLevel.HEADING_2,
-                  spacing: { before: idx === 0 ? 0 : 400, after: 120 },
-                  border: { bottom: { color: "CCCCCC", space: 1, value: BorderStyle.SINGLE, size: 6 } }
-                })
-              );
-
-              docChildren.push(
-                  new Paragraph({
-                      spacing: { after: 120 },
-                      children: [
-                          new TextRun({ text: "DATA: ", bold: true }),
-                          new TextRun({ text: `${session.date}   ` }),
-                          new TextRun({ text: `|   ${timeInfo}`, color: "666666" })
-                      ]
-                  })
-              );
-
-              docChildren.push(
-                  new Paragraph({
-                      spacing: { after: 200 },
-                      children: [
-                          new TextRun({ text: "ORIGEM: ", bold: true }),
-                          new TextRun({ text: sourceStr }),
-                          new TextRun({ text: "   ➜   ", bold: true, color: "0000FF" }),
-                          new TextRun({ text: "DESTINO: ", bold: true }),
-                          new TextRun({ text: destStr }),
-                      ]
-                  })
-              );
-
-              // Content
-              const lines = session.content.split(/\n/);
-              lines.forEach(line => {
-                  const trimmedLine = line.trim();
-                  if (trimmedLine) {
-                      const speakerMatch = trimmedLine.match(/^([A-ZÀ-Úa-zà-ú0-9_\-\s\.()]{1,50}:)(.*)/);
-                      if (speakerMatch) {
-                          docChildren.push(
-                              new Paragraph({
-                                  children: [
-                                      new TextRun({ text: speakerMatch[1], bold: true }),
-                                      new TextRun({ text: speakerMatch[2] })
-                                  ],
-                                  spacing: { after: 80 }
-                              })
-                          );
-                      } else {
-                          docChildren.push(
-                              new Paragraph({
-                                  children: [new TextRun({ text: trimmedLine })],
-                                  spacing: { after: 80 }
-                              })
-                          );
-                      }
-                  }
-              });
-          });
-
-          const doc = new Document({
-            sections: [{ properties: {}, children: docChildren }],
-          });
-
-          const blob = await Packer.toBuffer(doc);
-          const url = URL.createObjectURL(new Blob([blob]));
-          const a = document.createElement('a');
-          a.href = url;
-          a.download = `${prefix}_${new Date().toISOString().slice(0,10)}.docx`;
-          document.body.appendChild(a);
-          a.click();
-          document.body.removeChild(a);
-          URL.revokeObjectURL(url);
-
-      } catch (e) {
-          console.error("Export failed", e);
-          alert("Erro ao exportar DOCX.");
-      } finally {
-          setIsExporting(false);
-      }
-  };
-
-  const handleExportSelectedDocx = () => {
-      const sessionsToExport = sortedSessions.filter(s => manualSelection.has(s.sessionId));
-      exportSessionsToDocx(sessionsToExport, "Exportacao_Selecionada");
-  };
-
-  const handleExportResultsDocx = () => {
-      exportSessionsToDocx(sortedSessions, "Exportacao_Lista");
-  };
-
-  // --- COPY TO CLIPBOARD ---
-  const handleCopySession = (session: ParsedSession) => {
-      const sourceStr = resolve(session.sourceName) || resolve(session.sourceNumber) || session.sourceNumber || "N/D";
-      const destStr = resolve(session.destinationName) || resolve(session.destinationNumber) || session.destinationNumber || "N/D";
-      
-      const textToCopy = `SESSÃO: ${session.sessionId}
-ALVO: ${session.target}
-DATA: ${session.date} | Início: ${session.startTime || '-'} | Fim: ${session.endTime || '-'} | Duração: ${session.duration || '-'}
-ORIGEM: ${sourceStr} -> DESTINO: ${destStr}
-
-${session.content}
-`;
-      navigator.clipboard.writeText(textToCopy).then(() => {
-          setCopiedId(session.sessionId);
-          setTimeout(() => setCopiedId(null), 2000);
-      });
-  };
-
-  // --- BULK ACTIONS ---
-  const handleSelectAll = () => {
-      const allIds = sortedSessions.map(s => s.sessionId);
-      setManualSelection(new Set(allIds));
-  };
+    // --- AGGREGATE DATA FOR DROPDOWNS ---
+    const { allNumbers, allSpeakers, rawIdentities, availableArticles, availableFacts, availableTags } = useMemo(() => {
+        const numbers = new Set<string>();
+        const speakers = new Set<string>();
+        const rawSet = new Set<string>();
   
-  const handleDeselectAll = () => {
-      setManualSelection(new Set());
-  };
+        sessions.forEach(s => {
+            if (s.target) { const val = s.target; rawSet.add(val); numbers.add(resolve(val)!); }
+            if (s.sourceNumber) { rawSet.add(s.sourceNumber); numbers.add(resolve(s.sourceNumber)!); }
+            if (s.destinationNumber) { rawSet.add(s.destinationNumber); numbers.add(resolve(s.destinationNumber)!); }
+            if (s.sourceName) { rawSet.add(s.sourceName); speakers.add(resolve(s.sourceName)!); }
+            if (s.destinationName) { rawSet.add(s.destinationName); speakers.add(resolve(s.destinationName)!); }
+            // Fallback regex scan for speakers in content
+            const lines = s.content.split('\n');
+            lines.forEach(line => {
+               const match = line.match(/^([A-ZÀ-Ú][a-zà-ú0-9_\-\s]{1,30}):/);
+               if (match) { const name = match[1].trim(); rawSet.add(name); speakers.add(resolve(name)!); }
+            });
+        });
+        
+        // Filter out ARCHIVED items from search filters
+        const articles = legalReferences
+          .filter(r => r.type === 'ARTICLE' && (r.status === 'ACTIVE' || !r.status))
+          .map(r => r.label);
+        
+        const facts = legalReferences
+          .filter(r => r.type === 'FACT' && (r.status === 'ACTIVE' || !r.status))
+          .map(r => r.label);
+
+        const tags = legalReferences
+          .filter(r => r.type === 'TAG' && (r.status === 'ACTIVE' || !r.status))
+          .map(r => r.label);
   
-  const handleBulkDelete = () => {
-      if (manualSelection.size === 0) return;
-      onDeleteSessions(Array.from(manualSelection));
-      setManualSelection(new Set()); 
-  };
+        return {
+            allNumbers: Array.from(numbers).sort(),
+            allSpeakers: Array.from(speakers).sort(),
+            rawIdentities: Array.from(rawSet).sort(),
+            availableArticles: articles,
+            availableFacts: facts,
+            availableTags: tags
+        };
+    }, [sessions, resolve, legalReferences]);
 
-  const handleOpenPdf = async (session: ParsedSession) => {
-      if (loadingPdf) return;
-      setLoadingPdf(session.sessionId);
-      try {
-          const url = await onGetAsset(session, 'pdf');
-          url ? window.open(url, '_blank') : alert("PDF não encontrado.");
-      } catch (e) { alert("Erro ao abrir PDF."); } finally { setLoadingPdf(null); }
-  };
+    // --- FILTER LOGIC ---
+    const filteredSessions = useMemo(() => {
+        return sessions.filter(session => {
+            // 1. Tag Filter
+            if (activeTagIds.length > 0) {
+                const matchesTag = savedTags.some(tag => 
+                    activeTagIds.includes(tag.id) && tag.sessionIds.includes(session.sessionId)
+                );
+                if (!matchesTag) return false;
+            }
 
-  // --- CUSTOM DURATION INPUT RENDERER ---
-  const renderDurationInput = (value: string, setValue: (v: string) => void, placeholder: string) => {
-    const adjust = (delta: number) => {
-        const current = value === '' ? 0 : parseInt(value, 10);
-        if (isNaN(current)) {
-            setValue(delta > 0 ? delta.toString() : '0');
-        } else {
-            setValue(Math.max(0, current + delta).toString());
+            // 2. View Only Selected
+            if (viewOnlySelected) {
+                if (!manualSelection.has(session.sessionId)) return false;
+            }
+
+            // 3. Search Criteria
+            const f = activeFilters;
+            if (f.session && !session.sessionId.includes(f.session)) return false;
+            if (f.content) {
+                 const terms = f.content.toLowerCase().split(/\s+/);
+                 const contentLower = session.content.toLowerCase();
+                 // Simple AND logic
+                 if (!terms.every(term => contentLower.includes(term))) return false;
+            }
+            
+            // Date Range (YYYY-MM-DD) vs DD.MM.YYYY
+            if (f.dateStart || f.dateEnd) {
+                const parts = session.date.split('.'); // DD, MM, YYYY
+                if (parts.length === 3) {
+                    const sessDate = new Date(`${parts[2]}-${parts[1]}-${parts[0]}`); // YYYY-MM-DD
+                    if (f.dateStart) {
+                        const start = new Date(f.dateStart);
+                        if (sessDate < start) return false;
+                    }
+                    if (f.dateEnd) {
+                        const end = new Date(f.dateEnd);
+                        if (sessDate > end) return false;
+                    }
+                }
+            }
+
+            // Time Range
+            if (f.timeStart || f.timeEnd) {
+                if (session.startTime) {
+                    if (f.timeStart && session.startTime < f.timeStart) return false;
+                    if (f.timeEnd && session.startTime > f.timeEnd) return false;
+                }
+            }
+            
+            // Duration
+            const getSeconds = (dur: string) => {
+                const p = dur.split(':').map(Number);
+                if (p.length === 3) return p[0]*3600 + p[1]*60 + p[2];
+                if (p.length === 2) return p[0]*60 + p[1];
+                return 0;
+            };
+            if (f.minDuration || f.maxDuration) {
+                if (session.type !== 'AUDIO' || !session.duration) return false;
+                const sec = getSeconds(session.duration);
+                if (f.minDuration && sec < parseInt(f.minDuration)) return false;
+                if (f.maxDuration && sec > parseInt(f.maxDuration)) return false;
+            }
+
+            // Relations: Source Numbers
+            if (f.sourceNumbers.length > 0) {
+                const sNum = resolve(session.sourceNumber);
+                if (!sNum || !f.sourceNumbers.includes(sNum)) return false;
+            }
+            // Relations: Dest Numbers
+            if (f.destNumbers.length > 0) {
+                const dNum = resolve(session.destinationNumber);
+                if (!dNum || !f.destNumbers.includes(dNum)) return false;
+            }
+            // Relations: Source Speakers
+            if (f.sourceSpeakers.length > 0) {
+                const sName = resolve(session.sourceName);
+                if (!sName || !f.sourceSpeakers.includes(sName)) return false;
+            }
+            // Relations: Dest Speakers
+            if (f.destSpeakers.length > 0) {
+                const dName = resolve(session.destinationName);
+                if (!dName || !f.destSpeakers.includes(dName)) return false;
+            }
+
+            // Legal Matters
+            if (f.legalArticle.length > 0) {
+                if (!session.legalReferenceIds) return false;
+                const sessionLabels = session.legalReferenceIds.map(id => legalReferences.find(r => r.id === id)?.label);
+                if (!f.legalArticle.some(label => sessionLabels.includes(label))) return false;
+            }
+            if (f.legalFact.length > 0) {
+                if (!session.legalReferenceIds) return false;
+                const sessionLabels = session.legalReferenceIds.map(id => legalReferences.find(r => r.id === id)?.label);
+                if (!f.legalFact.some(label => sessionLabels.includes(label))) return false;
+            }
+            if (f.legalTag.length > 0) {
+                if (!session.legalReferenceIds) return false;
+                const sessionLabels = session.legalReferenceIds.map(id => legalReferences.find(r => r.id === id)?.label);
+                if (!f.legalTag.some(label => sessionLabels.includes(label))) return false;
+            }
+
+            return true;
+        });
+    }, [sessions, activeFilters, activeTagIds, savedTags, viewOnlySelected, manualSelection, resolve, legalReferences]);
+
+    // --- SORTING ---
+    const sortedSessions = useMemo(() => {
+        return [...filteredSessions].sort((a, b) => {
+             if (sortOption === 'date_desc' || sortOption === 'date_asc') {
+                 // DD.MM.YYYY
+                 const parseDate = (d: string) => {
+                     const p = d.split('.');
+                     return new Date(`${p[2]}-${p[1]}-${p[0]}T${a.startTime || '00:00:00'}`);
+                 };
+                 const dateA = parseDate(a.date).getTime();
+                 const dateB = parseDate(b.date).getTime();
+                 return sortOption === 'date_desc' ? dateB - dateA : dateA - dateB;
+             }
+             if (sortOption === 'duration_desc') {
+                 return (b.duration || '').localeCompare(a.duration || '');
+             }
+             if (sortOption === 'source_num') return (resolve(a.sourceNumber) || '').localeCompare(resolve(b.sourceNumber) || '');
+             if (sortOption === 'dest_num') return (resolve(a.destinationNumber) || '').localeCompare(resolve(b.destinationNumber) || '');
+             if (sortOption === 'source_name') return (resolve(a.sourceName) || '').localeCompare(resolve(b.sourceName) || '');
+             if (sortOption === 'dest_name') return (resolve(a.destinationName) || '').localeCompare(resolve(b.destinationName) || '');
+             return 0;
+        });
+    }, [filteredSessions, sortOption, resolve]);
+
+    // --- HANDLERS ---
+
+    const handleSearch = () => {
+        setActiveFilters({
+            session: inputSession, content: inputContent, dateStart: inputDateStart, dateEnd: inputDateEnd, timeStart: inputTimeStart, timeEnd: inputTimeEnd, 
+            sourceNumbers: filterSourceNumbers, destNumbers: filterDestNumbers,
+            sourceSpeakers: filterSourceSpeakers, destSpeakers: filterDestSpeakers,
+            minDuration: inputMinDuration, maxDuration: inputMaxDuration,
+            legalArticle: filterLegalArticle, legalFact: filterLegalFact, legalTag: filterLegalTag
+        });
+    };
+
+    const handleClearFilters = () => {
+        setInputSession(''); setInputContent(''); setInputDateStart(''); setInputDateEnd(''); setInputTimeStart(''); setInputTimeEnd('');
+        setFilterSourceNumbers([]); setFilterDestNumbers([]); setFilterSourceSpeakers([]); setFilterDestSpeakers([]);
+        setInputMinDuration(''); setInputMaxDuration('');
+        setFilterLegalArticle([]); setFilterLegalFact([]); setFilterLegalTag([]);
+        
+        setActiveFilters({
+            session: '', content: '', dateStart: '', dateEnd: '', timeStart: '', timeEnd: '',
+            sourceNumbers: [], destNumbers: [], sourceSpeakers: [], destSpeakers: [],
+            minDuration: '', maxDuration: '', legalArticle: [], legalFact: [], legalTag: []
+        });
+        setActiveTagIds([]);
+        setManualSelection(new Set());
+        setViewOnlySelected(false);
+    };
+
+    const handleSelectAll = () => {
+        const ids = new Set(manualSelection);
+        sortedSessions.forEach(s => ids.add(s.sessionId));
+        setManualSelection(ids);
+    };
+
+    const handleDeselectAll = () => {
+        setManualSelection(new Set());
+    };
+
+    const handleBulkDelete = () => {
+        onDeleteSessions(Array.from(manualSelection));
+        setManualSelection(new Set());
+    };
+
+    // Tags
+    const saveTag = () => {
+        if (!tagName.trim() || manualSelection.size === 0) return;
+        const newTag: SavedTag = {
+            id: Date.now().toString(),
+            name: tagName,
+            timestamp: Date.now(),
+            sessionIds: Array.from(manualSelection),
+            filterDescription: `${manualSelection.size} itens`
+        };
+        setSavedTags(prev => [...prev, newTag]);
+        setTagName('');
+    };
+
+    const toggleTag = (id: string) => {
+        setActiveTagIds(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
+    };
+
+    const deleteTag = (e: React.MouseEvent, id: string) => {
+        e.stopPropagation();
+        if (window.confirm("Eliminar etiqueta?")) {
+            setSavedTags(prev => prev.filter(t => t.id !== id));
+            setActiveTagIds(prev => prev.filter(t => t !== id));
         }
     };
 
-    return (
-        <div className="relative">
-            <input 
-                type="number" 
-                min="0"
-                value={value} 
-                onChange={(e) => setValue(e.target.value)} 
-                placeholder={placeholder}
-                className="w-full pl-3 pr-8 py-2 bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-200 border border-slate-300 dark:border-slate-700 rounded-md text-sm focus:ring-2 focus:ring-blue-500 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none" 
-            />
-            <div className="absolute right-1 top-1 bottom-1 flex flex-col w-5 gap-px">
-                <button 
-                    onClick={() => adjust(1)}
-                    className="flex-1 bg-slate-100 hover:bg-slate-200 dark:bg-slate-700 dark:hover:bg-slate-600 text-slate-500 dark:text-slate-400 rounded-t-sm flex items-center justify-center transition-colors border border-slate-200 dark:border-slate-600"
-                >
-                    <i className="fa-solid fa-caret-up text-[8px] leading-none"></i>
-                </button>
-                <button 
-                    onClick={() => adjust(-1)}
-                    className="flex-1 bg-slate-100 hover:bg-slate-200 dark:bg-slate-700 dark:hover:bg-slate-600 text-slate-500 dark:text-slate-400 rounded-b-sm flex items-center justify-center transition-colors border border-slate-200 dark:border-slate-600"
-                >
-                     <i className="fa-solid fa-caret-down text-[8px] leading-none"></i>
-                </button>
-            </div>
-        </div>
+    const startEditingTag = (e: React.MouseEvent, tag: SavedTag) => {
+        e.stopPropagation();
+        setEditingTagId(tag.id);
+        setEditTagName(tag.name);
+    };
+
+    const cancelEditingTag = (e: React.MouseEvent) => {
+        e.stopPropagation();
+        setEditingTagId(null);
+    };
+
+    const saveEditedTag = (e: React.MouseEvent) => {
+        e.stopPropagation();
+        if (editingTagId && editTagName.trim()) {
+            setSavedTags(prev => prev.map(t => t.id === editingTagId ? { ...t, name: editTagName } : t));
+            setEditingTagId(null);
+        }
+    };
+
+    // Asset Opening
+    const handleOpenPdf = async (session: ParsedSession) => {
+        setLoadingPdf(session.sessionId);
+        try {
+            const url = await onGetAsset(session, 'pdf');
+            if (url) window.open(url, '_blank');
+            else alert("PDF Original não encontrado.");
+        } finally {
+            setLoadingPdf(null);
+        }
+    };
+
+    // Copy Content
+    const handleCopySession = (session: ParsedSession) => {
+        const text = `Sessão: ${session.sessionId}\nData: ${session.date} ${session.startTime}\nDe: ${session.sourceNumber || '?'} -> Para: ${session.destinationNumber || '?'}\n\n${session.content}`;
+        navigator.clipboard.writeText(text);
+        setCopiedId(session.sessionId);
+        setTimeout(() => setCopiedId(null), 2000);
+    };
+
+    // Legal Linking
+    const linkLegalReference = () => {
+        if (manualSelection.size === 0) return;
+        
+        // Find IDs for selected labels
+        const articleIds = legalReferences.filter(r => r.type === 'ARTICLE' && selectedArticlesToLink.includes(r.label)).map(r => r.id);
+        const factIds = legalReferences.filter(r => r.type === 'FACT' && selectedFactsToLink.includes(r.label)).map(r => r.id);
+        const tagIds = legalReferences.filter(r => r.type === 'TAG' && selectedTagsToLink.includes(r.label)).map(r => r.id);
+        const idsToLink = [...articleIds, ...factIds, ...tagIds];
+
+        if (idsToLink.length === 0) return;
+
+        setSessions(prev => prev.map(s => {
+            if (manualSelection.has(s.sessionId)) {
+                const existing = new Set(s.legalReferenceIds || []);
+                idsToLink.forEach(id => existing.add(id));
+                return { ...s, legalReferenceIds: Array.from(existing) };
+            }
+            return s;
+        }));
+        
+        // Clear temp selection
+        setSelectedArticlesToLink([]);
+        setSelectedFactsToLink([]);
+        setSelectedTagsToLink([]);
+    };
+
+    const unlinkLegalReference = (sessionId: string, refId: string) => {
+        setSessions(prev => prev.map(s => {
+            if (s.sessionId === sessionId && s.legalReferenceIds) {
+                return { ...s, legalReferenceIds: s.legalReferenceIds.filter(id => id !== refId) };
+            }
+            return s;
+        }));
+    };
+
+    // EXPORT
+    const handleExportResultsDocx = async () => {
+        if (sortedSessions.length === 0) return;
+        if (onExportSessions) {
+            onExportSessions(sortedSessions);
+        }
+    };
+
+    const handleExportSelectedDocx = async () => {
+        const selected = sessions.filter(s => manualSelection.has(s.sessionId));
+        if (selected.length === 0) return;
+        if (onExportSessions) {
+            onExportSessions(selected);
+        }
+    };
+
+    const renderDurationInput = (val: string, setVal: (v: string) => void, placeholder: string) => (
+        <input 
+            type="number" 
+            value={val} 
+            onChange={e => setVal(e.target.value)} 
+            className="bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-200 border border-slate-300 dark:border-slate-700 rounded text-xs px-2 py-1 w-full" 
+            placeholder={placeholder}
+        />
     );
-  };
 
-  return (
-    <div className="w-full max-w-[1500px] mx-auto p-4 min-h-screen font-sans flex flex-col relative z-10">
-      {showAliasModal && (
-          <IdentityManager 
-              rawIdentities={rawIdentities} 
-              aliasMap={aliasMap} 
-              onSave={setAliasMap} 
-              onClose={() => setShowAliasModal(false)} 
-          />
-      )}
-      {showImportModal && (
-          <ImportModal 
-            onClose={() => setShowImportModal(false)}
-            onImport={onImport}
-            sessions={sessions}
-            onDeleteFiles={onDeleteFiles}
-          />
-      )}
+    const getRefStyle = (ref: LegalReference) => {
+        if (ref.status === 'ARCHIVED') return 'opacity-50';
+        if (ref.type === 'ARTICLE') return 'bg-red-50 text-red-700 border-red-200 dark:bg-red-900/20 dark:text-red-400 dark:border-red-900/30';
+        if (ref.type === 'FACT') return 'bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-900/20 dark:text-amber-400 dark:border-amber-900/30';
+        if (ref.type === 'TAG') return 'bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-900/20 dark:text-emerald-400 dark:border-emerald-900/30';
+        return '';
+    };
 
-      {/* REFINED HEADER */}
-      <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-800 px-6 py-4 mb-6 flex flex-col xl:flex-row justify-between items-center gap-4">
+    return (
+        <div className="w-full max-w-[1500px] mx-auto p-4 min-h-screen font-sans flex flex-col relative z-10">
+          {showAliasModal && (
+              <IdentityManager 
+                  rawIdentities={rawIdentities} 
+                  aliasMap={aliasMap} 
+                  onSave={setAliasMap} 
+                  onClose={() => setShowAliasModal(false)} 
+              />
+          )}
+          {showImportModal && (
+              <ImportModal 
+                onClose={() => setShowImportModal(false)}
+                onImport={onImport}
+                sessions={sessions}
+                onDeleteFiles={onDeleteFiles}
+              />
+          )}
+          {showLegalModal && (
+              <LegalMatterModal 
+                legalReferences={legalReferences}
+                onSave={setLegalReferences}
+                onClose={() => setShowLegalModal(false)}
+              />
+          )}
           
-          <div className="flex items-center gap-4">
-              <button onClick={onBack} className="w-10 h-10 rounded-full bg-slate-50 hover:bg-slate-100 dark:bg-slate-800 dark:hover:bg-slate-700 flex items-center justify-center text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-white transition-colors">
-                  <i className="fa-solid fa-arrow-left"></i>
-              </button>
-              <div>
-                  <h1 className="text-xl font-bold text-slate-800 dark:text-white">Explorador de Sessões</h1>
-                  <p className="text-xs text-slate-500 dark:text-slate-400">
-                    <span className="font-semibold text-blue-600 dark:text-blue-500">{filteredSessions.length}</span> resultados de <span className="text-slate-700 dark:text-slate-300">{sessions.length}</span> totais
-                  </p>
+          <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-800 px-6 py-4 mb-6 flex flex-col xl:flex-row justify-between items-center gap-4">
+              <div className="flex items-center gap-4">
+                  <button onClick={onBack} className="w-10 h-10 rounded-full bg-slate-50 hover:bg-slate-100 dark:bg-slate-800 dark:hover:bg-slate-700 flex items-center justify-center text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-white transition-colors">
+                      <i className="fa-solid fa-arrow-left"></i>
+                  </button>
+                  <div>
+                      <h1 className="text-xl font-bold text-slate-800 dark:text-white">Explorador de Sessões</h1>
+                      <p className="text-xs text-slate-500 dark:text-slate-400">
+                        <span className="font-semibold text-blue-600 dark:text-blue-500">{filteredSessions.length}</span> resultados de <span className="text-slate-700 dark:text-slate-300">{sessions.length}</span> totais
+                      </p>
+                  </div>
+              </div>
+    
+              <div className="flex items-center gap-3">
+                  <button onClick={() => setShowImportModal(true)} className="px-5 py-2.5 bg-blue-600 text-white rounded-xl shadow-md shadow-blue-200 dark:shadow-blue-900/50 hover:bg-blue-700 hover:shadow-lg transition-all font-bold text-sm flex items-center gap-2">
+                      <i className="fa-solid fa-cloud-arrow-up"></i> Importar / Gerir
+                  </button>
+                  <button onClick={onSaveProject} className="px-5 py-2.5 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 rounded-xl hover:bg-slate-50 dark:hover:bg-slate-700 hover:border-slate-300 dark:hover:border-slate-600 transition-all font-bold text-sm flex items-center gap-2">
+                      <i className="fa-solid fa-floppy-disk text-green-600 dark:text-green-500"></i> Guardar Projeto
+                  </button>
               </div>
           </div>
-
-          <div className="flex items-center gap-3">
-              <button onClick={() => setShowImportModal(true)} className="px-5 py-2.5 bg-blue-600 text-white rounded-xl shadow-md shadow-blue-200 dark:shadow-blue-900/50 hover:bg-blue-700 hover:shadow-lg transition-all font-bold text-sm flex items-center gap-2">
-                  <i className="fa-solid fa-cloud-arrow-up"></i> Importar / Gerir
-              </button>
-              <button onClick={onSaveProject} className="px-5 py-2.5 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 rounded-xl hover:bg-slate-50 dark:hover:bg-slate-700 hover:border-slate-300 dark:hover:border-slate-600 transition-all font-bold text-sm flex items-center gap-2">
-                  <i className="fa-solid fa-floppy-disk text-green-600 dark:text-green-500"></i> Guardar Projeto
-              </button>
-          </div>
-      </div>
-
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 flex-1">
-        
-        {/* LEFT COLUMN: FILTERS */}
-        <div className="lg:col-span-3 space-y-4">
-          <div className="bg-white dark:bg-slate-900 p-5 rounded-xl shadow-sm border border-slate-200 dark:border-slate-800 sticky top-4 max-h-[calc(100vh-2rem)] overflow-y-auto custom-scrollbar space-y-5">
-            <h3 className="font-semibold text-slate-700 dark:text-slate-200 mb-4 border-b border-slate-100 dark:border-slate-800 pb-2 flex items-center gap-2">
-                <i className="fa-solid fa-filter text-blue-500"></i> Filtros
-            </h3>
+    
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 flex-1">
             
-            <button onClick={() => setShowAliasModal(true)} className="w-full py-2 bg-purple-50 hover:bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-400 border border-purple-200 dark:border-purple-500/30 rounded-lg font-bold text-xs dark:hover:bg-purple-900/50 mb-2 transition-colors flex items-center justify-center gap-2">
-                <i className="fa-solid fa-users-gear"></i> Gerir Identidades
-            </button>
-            
-            {/* NUMBER RELATIONS FILTER */}
-            <div className="space-y-2">
-                <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2 border-b border-slate-100 dark:border-slate-800 pb-1 mb-2">
-                    <i className="fa-solid fa-arrow-right-arrow-left"></i> Relação entre Números
-                </div>
-                <MultiSelectDropdown label="De (Origem)" placeholder="Qualquer" options={allNumbers} selected={filterSourceNumbers} onChange={setFilterSourceNumbers} />
-                <div className="flex justify-center -my-2 relative z-10"><i className="fa-solid fa-arrow-down text-slate-300 dark:text-slate-600 text-xs"></i></div>
-                <MultiSelectDropdown label="Para (Destino)" placeholder="Qualquer" options={allNumbers} selected={filterDestNumbers} onChange={setFilterDestNumbers} />
-            </div>
-
-            {/* SPEAKER RELATIONS FILTER */}
-            <div className="space-y-2 pt-2">
-                <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2 border-b border-slate-100 dark:border-slate-800 pb-1 mb-2">
-                    <i className="fa-solid fa-people-arrows"></i> Relação entre Intervenientes
-                </div>
-                <MultiSelectDropdown label="De (Origem)" placeholder="Qualquer" options={allSpeakers} selected={filterSourceSpeakers} onChange={setFilterSourceSpeakers} />
-                <div className="flex justify-center -my-2 relative z-10"><i className="fa-solid fa-arrow-down text-slate-300 dark:text-slate-600 text-xs"></i></div>
-                <MultiSelectDropdown label="Para (Destino)" placeholder="Qualquer" options={allSpeakers} selected={filterDestSpeakers} onChange={setFilterDestSpeakers} />
-            </div>
-            
-            <div className="pt-2 border-t border-slate-100 dark:border-slate-800">
-                <div><label className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase">ID Sessão</label><input type="text" value={inputSession} onChange={(e) => setInputSession(e.target.value)} className="w-full px-3 py-2 bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-200 border border-slate-300 dark:border-slate-700 rounded-md text-sm placeholder-slate-400 dark:placeholder-slate-500 focus:outline-none focus:border-blue-500" placeholder="Ex: 1450" /></div>
-            </div>
-            <div><label className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase">Conteúdo</label><textarea value={inputContent} onChange={(e) => setInputContent(e.target.value)} rows={2} className="w-full px-3 py-2 bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-200 border border-slate-300 dark:border-slate-700 rounded-md text-sm placeholder-slate-400 dark:placeholder-slate-500 focus:outline-none focus:border-blue-500" placeholder="Pesquisa Booleana..." /></div>
-            
-            <div className="border-t border-slate-200 dark:border-slate-800 pt-2">
-                <label className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase mb-1 block">Datas</label>
-                <div className="grid grid-cols-2 gap-2 mb-2">
-                    <input type="date" value={inputDateStart} onChange={(e) => setInputDateStart(e.target.value)} className="bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-200 border border-slate-300 dark:border-slate-700 rounded text-xs px-2 py-1" />
-                    <input type="date" value={inputDateEnd} onChange={(e) => setInputDateEnd(e.target.value)} className="bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-200 border border-slate-300 dark:border-slate-700 rounded text-xs px-2 py-1" />
-                </div>
-                <label className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase mb-1 block">Horário</label>
-                <div className="grid grid-cols-2 gap-2 mb-3">
-                    <input type="time" value={inputTimeStart} onChange={(e) => setInputTimeStart(e.target.value)} className="bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-200 border border-slate-300 dark:border-slate-700 rounded text-xs px-2 py-1" />
-                    <input type="time" value={inputTimeEnd} onChange={(e) => setInputTimeEnd(e.target.value)} className="bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-200 border border-slate-300 dark:border-slate-700 rounded text-xs px-2 py-1" />
-                </div>
+            {/* LEFT COLUMN: FILTERS */}
+            <div className="lg:col-span-3 space-y-4">
+              <div className="bg-white dark:bg-slate-900 p-5 rounded-xl shadow-sm border border-slate-200 dark:border-slate-800 sticky top-4 max-h-[calc(100vh-2rem)] overflow-y-auto custom-scrollbar flex flex-col gap-4">
                 
-                {/* DURATION FILTER (RANGE) */}
-                <label className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase mb-1 block">Duração (segundos) [Áudio]</label>
-                <div className="grid grid-cols-2 gap-2">
-                    {renderDurationInput(inputMinDuration, setInputMinDuration, "Mín")}
-                    {renderDurationInput(inputMaxDuration, setInputMaxDuration, "Máx")}
-                </div>
-            </div>
-
-            <div className="pt-2 flex gap-2">
-                <button onClick={handleSearch} className="flex-1 py-2 bg-blue-600 text-white rounded-lg font-bold hover:bg-blue-700 transition-colors shadow-sm"><i className="fa-solid fa-search"></i> Pesquisar</button>
-                <button onClick={handleClearFilters} className="px-3 py-2 bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 rounded-lg hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors" title="Limpar Filtros e Etiquetas"><i className="fa-solid fa-eraser"></i></button>
-            </div>
-          </div>
-        </div>
-
-        {/* MIDDLE COLUMN: RESULTS */}
-        <div className="lg:col-span-6 flex flex-col gap-4">
-            
-            {/* UNIFIED TOOLBAR: Bulk Actions & Sorting */}
-            <div className="bg-white dark:bg-slate-900 p-3 rounded-xl border border-slate-200 dark:border-slate-800 flex flex-col sm:flex-row justify-between items-center shadow-sm gap-3">
-                <div className="flex items-center gap-2 flex-wrap">
-                    <button 
-                        onClick={handleSelectAll}
-                        className="px-3 py-1.5 text-xs font-bold text-blue-700 bg-blue-50 hover:bg-blue-100 dark:text-blue-400 dark:bg-blue-900/30 dark:hover:bg-blue-900/50 rounded-lg transition-colors border border-blue-100 dark:border-blue-900/30"
-                    >
-                        <i className="fa-solid fa-check-double mr-1.5"></i> Selecionar Tudo
-                    </button>
-                    
-                    <button 
-                        onClick={handleExportResultsDocx}
-                        disabled={isExporting}
-                        className="px-3 py-1.5 text-xs font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 dark:text-slate-300 dark:bg-slate-800 dark:hover:bg-slate-700 border border-slate-200 dark:border-slate-700 rounded-lg transition-colors flex items-center gap-1"
-                        title="Exportar todos os resultados listados abaixo"
-                    >
-                        {isExporting ? <i className="fa-solid fa-spinner fa-spin"></i> : <i className="fa-solid fa-file-word text-blue-600 dark:text-blue-500"></i>}
-                        Exportar Lista ({sortedSessions.length})
-                    </button>
-
-                    {manualSelection.size > 0 && (
-                        <>
-                            <div className="h-6 w-px bg-slate-300 dark:bg-slate-700 mx-1"></div>
-                            <button 
-                                onClick={handleDeselectAll}
-                                className="px-3 py-1.5 text-xs font-bold text-slate-600 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800 rounded-lg transition-colors"
-                            >
-                                Desmarcar
-                            </button>
-                            <button 
-                                onClick={handleExportSelectedDocx}
-                                className="px-3 py-1.5 text-xs font-bold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 dark:text-indigo-400 dark:bg-indigo-900/30 dark:hover:bg-indigo-900/50 border border-indigo-200 dark:border-indigo-900/30 rounded-lg transition-colors flex items-center gap-1"
-                            >
-                                <i className="fa-solid fa-file-export"></i> Exportar Sel. ({manualSelection.size})
-                            </button>
-                            <button 
-                                onClick={handleBulkDelete}
-                                className="px-3 py-1.5 text-xs font-bold text-red-600 bg-red-50 hover:bg-red-100 dark:text-red-400 dark:bg-red-900/30 dark:hover:bg-red-900/50 border border-red-200 dark:border-red-900/30 rounded-lg transition-colors"
-                            >
-                                <i className="fa-solid fa-trash"></i>
-                            </button>
-                        </>
-                    )}
-                </div>
-
-                <div className="flex items-center gap-2 ml-auto sm:ml-0">
-                    <div className="text-xs font-bold text-slate-400 dark:text-slate-500 uppercase"><i className="fa-solid fa-sort"></i></div>
-                    <select 
-                        value={sortOption} 
-                        onChange={(e) => setSortOption(e.target.value as SortOption)}
-                        className="bg-transparent border-none rounded-lg text-xs font-semibold text-slate-600 dark:text-slate-300 focus:ring-0 py-1 pl-0 pr-8 cursor-pointer hover:text-blue-600 dark:hover:text-blue-400 transition-colors text-right"
-                        style={{ backgroundImage: 'none' }} // Remove default arrow to style cleaner if needed, but standard select is fine for accessibility
-                    >
-                        <option value="date_desc">Data (Recente)</option>
-                        <option value="date_asc">Data (Antiga)</option>
-                        <option value="duration_desc">Duração</option>
-                        <option value="source_num">Nº Origem</option>
-                        <option value="dest_num">Nº Destino</option>
-                        <option value="source_name">Interv. Origem</option>
-                        <option value="dest_name">Interv. Destino</option>
-                    </select>
-                </div>
-            </div>
-
-            <div className="grid grid-cols-1 gap-4 content-start">
-            {sortedSessions.map((session, idx) => {
-                const isSelected = manualSelection.has(session.sessionId);
-                
-                // Display Names (Resolved)
-                const sourceDisplay = resolve(session.sourceName) || resolve(session.sourceNumber) || session.sourceNumber || "?";
-                const destDisplay = resolve(session.destinationName) || resolve(session.destinationNumber) || session.destinationNumber || "?";
-                
-                return (
-                <div key={`${session.sessionId}-${idx}`} className={`bg-white dark:bg-slate-900 rounded-xl border shadow-sm flex flex-col h-[340px] relative group transition-all hover:shadow-md ${isSelected ? 'border-blue-500 ring-2 ring-blue-100 dark:ring-blue-900/50' : 'border-slate-200 dark:border-slate-800'}`}>
-                    
-                    {/* Checkbox moved to LEFT side */}
-                    <div className="absolute top-3 left-3 z-20">
-                        <div className="bg-white dark:bg-slate-900 rounded border border-slate-200 dark:border-slate-700 shadow-sm p-1 flex items-center justify-center cursor-pointer hover:border-blue-400">
-                            <input 
-                                type="checkbox" 
-                                checked={isSelected} 
-                                onChange={() => setManualSelection(prev => { const n = new Set(prev); n.has(session.sessionId) ? n.delete(session.sessionId) : n.add(session.sessionId); return n; })} 
-                                className="w-4 h-4 cursor-pointer bg-white dark:bg-slate-900 accent-blue-600 border-slate-300 dark:border-slate-600" 
-                            />
-                        </div>
-                    </div>
-                    
-                    {/* Header */}
-                    <div className="bg-slate-50 dark:bg-slate-800/50 px-4 pl-10 py-3 border-b border-slate-100 dark:border-slate-800 rounded-t-xl">
-                        <div className="flex justify-between items-start">
-                            <div className="flex-1 min-w-0 pr-6">
-                                <div className="flex items-center flex-wrap gap-2 mb-1.5">
-                                    <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${session.type === 'SMS' ? 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400' : 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400'}`}>{session.type}</span>
-                                    <span className="font-mono text-xs text-slate-700 dark:text-slate-400 font-bold bg-white dark:bg-slate-900 px-1.5 border border-slate-200 dark:border-slate-700 rounded">ID: {session.sessionId}</span>
-                                    <div className="flex items-center gap-2">
-                                        <span className="text-[10px] text-slate-500 font-medium bg-white dark:bg-slate-900 px-1.5 border border-slate-200 dark:border-slate-700 rounded truncate max-w-[120px]" title={session.target}>Alvo: {session.target}</span>
-                                        <button 
-                                            onClick={() => handleCopySession(session)}
-                                            className="text-slate-400 hover:text-blue-500 transition-colors"
-                                            title="Copiar Transcrição e Metadados"
-                                        >
-                                            {copiedId === session.sessionId ? <i className="fa-solid fa-check text-green-500"></i> : <i className="fa-regular fa-copy"></i>}
-                                        </button>
-                                        <button 
-                                            onClick={() => onDeleteSessions([session.sessionId])}
-                                            className="text-slate-400 hover:text-red-500 transition-colors opacity-0 group-hover:opacity-100"
-                                            title="Eliminar este registo"
-                                        >
-                                            <i className="fa-solid fa-trash"></i>
-                                        </button>
-                                    </div>
-                                </div>
-                                {/* Source -> Dest Display */}
-                                <div className="text-xs text-slate-800 dark:text-slate-300 leading-tight">
-                                    <div className="flex items-center gap-1.5 truncate">
-                                        <i className="fa-solid fa-phone-volume text-[10px] text-green-600 dark:text-green-500"></i> 
-                                        <span className="font-bold truncate" title={sourceDisplay}>{sourceDisplay}</span> 
-                                        {/* Show raw if alias exists and differs */}
-                                        {session.sourceName && resolve(session.sourceName) !== session.sourceName && <span className="text-[10px] text-slate-400 dark:text-slate-500 truncate hidden sm:inline">({session.sourceName})</span>}
-                                    </div>
-                                    <div className="flex items-center gap-1.5 mt-1 truncate">
-                                        <i className="fa-solid fa-arrow-down text-[10px] text-slate-400 dark:text-slate-500 ml-0.5"></i>
-                                        <span className="font-bold truncate" title={destDisplay}>{destDisplay}</span>
-                                        {session.destinationName && resolve(session.destinationName) !== session.destinationName && <span className="text-[10px] text-slate-400 dark:text-slate-500 truncate hidden sm:inline">({session.destinationName})</span>}
-                                    </div>
-                                </div>
-                            </div>
-                            <div className="text-right text-xs text-slate-500 pt-0.5 shrink-0">
-                                <div className="font-semibold text-slate-700 dark:text-slate-400">{session.date}</div>
-                                <div className="font-mono bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 px-1 rounded inline-block mb-0.5">{session.startTime}</div>
-                                {/* DURATION DISPLAY */}
-                                {session.duration && (
-                                    <div className="font-mono text-[10px] text-slate-400 dark:text-slate-500 flex items-center justify-end gap-1" title="Duração">
-                                        <i className="fa-regular fa-clock text-[9px]"></i> {session.duration}
-                                    </div>
-                                )}
-                            </div>
-                        </div>
-                    </div>
-
-                    <div className="flex-1 overflow-y-auto custom-scrollbar p-3 space-y-1.5 bg-white dark:bg-slate-900">
-                        {session.content.split('\n').map((line, i) => {
-                             const trimmed = line.trim();
-                             if (!trimmed) return null;
-                             
-                             // Detect Speaker pattern: e.g., "Name:" or "Name (Info):"
-                             const match = trimmed.match(/^([A-ZÀ-Úa-zà-ú0-9_\-\s\.()]+:)(.*)/);
-                             
-                             if (match) {
-                                 // DO NOT USE ALIAS HERE, keep original text
-                                 return (
-                                     <div key={i} className="text-xs px-2 py-1 border-b border-slate-50 dark:border-slate-800 last:border-0 rounded bg-slate-50/50 dark:bg-slate-800/30 text-slate-700 dark:text-slate-300">
-                                         <span className="font-bold text-slate-900 dark:text-slate-100">{match[1]}</span>
-                                         <span>{match[2]}</span>
-                                     </div>
-                                 );
-                             } else {
-                                 // Regular text
-                                 return (
-                                    <div key={i} className="text-xs px-2 py-1 border-b border-slate-50 dark:border-slate-800 last:border-0 rounded text-slate-600 dark:text-slate-400">
-                                        {trimmed}
-                                    </div>
-                                 );
-                             }
-                        })}
-                    </div>
-
-                    <div className="px-4 py-2 bg-white dark:bg-slate-900 border-t border-slate-100 dark:border-slate-800 rounded-b-xl">
-                        <button onClick={() => handleOpenPdf(session)} disabled={!session.pdfPath && !session.pdfUrl} className="w-full text-xs font-bold py-2 rounded-lg bg-red-50 hover:bg-red-100 dark:bg-red-900/20 text-red-700 dark:text-red-400 dark:hover:bg-red-900/30 transition-colors flex items-center justify-center gap-2 border border-transparent dark:border-red-900/30">
-                             {loadingPdf === session.sessionId ? <i className="fa-solid fa-spinner fa-spin"></i> : <><i className="fa-regular fa-file-pdf"></i> Ver Original</>}
-                        </button>
-                    </div>
-                </div>
-            )})}
-            </div>
-        </div>
-
-        {/* RIGHT COLUMN: SAVED TAGS / CONTEXT */}
-        <div className="lg:col-span-3 space-y-4">
-             <div className="bg-white dark:bg-slate-900 p-5 rounded-xl shadow-sm border border-slate-200 dark:border-slate-800">
-                <h3 className="font-semibold text-slate-700 dark:text-slate-200 mb-3 text-sm flex items-center gap-2">
-                    <i className="fa-solid fa-bookmark text-yellow-500"></i> Criar Etiqueta
+                <h3 className="font-semibold text-slate-700 dark:text-slate-200 border-b border-slate-100 dark:border-slate-800 pb-2 flex items-center gap-2">
+                    <i className="fa-solid fa-filter text-blue-500"></i> Critérios de Pesquisa
                 </h3>
-                
-                <div className="flex flex-col gap-2 mb-3">
-                    <button 
-                        onClick={() => setViewOnlySelected(!viewOnlySelected)}
-                        className={`w-full py-2 text-xs font-bold rounded-lg border transition-all flex items-center justify-center gap-2 ${viewOnlySelected ? 'bg-green-100 border-green-300 text-green-700 dark:bg-green-900/30 dark:border-green-500/50 dark:text-green-400 shadow-inner' : 'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100 dark:bg-slate-800 dark:border-slate-700 dark:text-slate-400 dark:hover:bg-slate-700'}`}
-                    >
-                        {viewOnlySelected ? <><i className="fa-solid fa-eye"></i>A ver Seleção</> : <><i className="fa-regular fa-eye"></i>Ver Só Selecionados</>}
-                    </button>
+    
+                <div className="space-y-3">
+                    <div><label className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase">ID Sessão</label><input type="text" value={inputSession} onChange={(e) => setInputSession(e.target.value)} className="w-full px-3 py-2 bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-200 border border-slate-300 dark:border-slate-700 rounded-md text-sm placeholder-slate-400 dark:placeholder-slate-500 focus:outline-none focus:border-blue-500" placeholder="Ex: 1450" /></div>
                     
-                    {manualSelection.size > 0 && (
-                        <button 
-                            onClick={() => { setManualSelection(new Set()); setViewOnlySelected(false); }}
-                            className="w-full py-2 text-xs font-bold rounded-lg border bg-red-50 border-red-200 text-red-600 hover:bg-red-100 dark:bg-red-900/20 dark:border-red-900/30 dark:text-red-400 dark:hover:bg-red-900/30 transition-colors flex items-center justify-center gap-2"
+                    <div><label className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase">Conteúdo</label><textarea value={inputContent} onChange={(e) => setInputContent(e.target.value)} rows={2} className="w-full px-3 py-2 bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-200 border border-slate-300 dark:border-slate-700 rounded-md text-sm placeholder-slate-400 dark:placeholder-slate-500 focus:outline-none focus:border-blue-500" placeholder="Pesquisa Booleana..." /></div>
+                    
+                    <div className="pt-2 border-t border-slate-100 dark:border-slate-800">
+                         <label className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase mb-1 block">Matéria Legal</label>
+                         <div className="space-y-2">
+                             <MultiSelectDropdown label="Artigo" placeholder="Todos" options={availableArticles} selected={filterLegalArticle} onChange={setFilterLegalArticle} />
+                             <MultiSelectDropdown label="Facto" placeholder="Todos" options={availableFacts} selected={filterLegalFact} onChange={setFilterLegalFact} />
+                             <MultiSelectDropdown label="Etiqueta" placeholder="Todas" options={availableTags} selected={filterLegalTag} onChange={setFilterLegalTag} />
+                         </div>
+                    </div>
+    
+                    <div className="pt-2 border-t border-slate-200 dark:border-slate-800">
+                        <label className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase mb-1 block">Datas</label>
+                        <div className="grid grid-cols-2 gap-2">
+                            <input type="date" value={inputDateStart} onChange={(e) => setInputDateStart(e.target.value)} className="bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-200 border border-slate-300 dark:border-slate-700 rounded text-xs px-2 py-1" />
+                            <input type="date" value={inputDateEnd} onChange={(e) => setInputDateEnd(e.target.value)} className="bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-200 border border-slate-300 dark:border-slate-700 rounded text-xs px-2 py-1" />
+                        </div>
+                    </div>
+                </div>
+    
+                <button 
+                    onClick={() => setIsAdvancedSearchOpen(!isAdvancedSearchOpen)}
+                    className="w-full py-2 bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 font-bold text-xs rounded-lg hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors flex items-center justify-center gap-2"
+                >
+                    {isAdvancedSearchOpen ? <i className="fa-solid fa-chevron-up"></i> : <i className="fa-solid fa-chevron-down"></i>}
+                    Pesquisa Avançada
+                </button>
+    
+                {isAdvancedSearchOpen && (
+                    <div className="space-y-4 animate-fade-in">
+                        
+                        <button onClick={() => setShowAliasModal(true)} className="w-full py-2 bg-purple-50 hover:bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-400 border border-purple-200 dark:border-purple-500/30 rounded-lg font-bold text-xs dark:hover:bg-purple-900/50 transition-colors flex items-center justify-center gap-2"
                         >
-                            <i className="fa-solid fa-trash"></i>Limpar Seleção
+                            <i className="fa-solid fa-users-gear"></i> Gerir Identidades
                         </button>
-                    )}
-                </div>
-
-                <div className="text-xs mb-2 text-slate-500 font-medium">
-                    {manualSelection.size > 0 ? `Etiquetar ${manualSelection.size} selecionados` : `Etiquetar ${filteredSessions.length} filtrados`}
-                </div>
-                <div className="flex gap-2">
-                    <input type="text" value={tagName} onChange={(e) => setTagName(e.target.value)} placeholder="Nome..." className="flex-1 px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:bg-white transition-colors dark:bg-slate-800 dark:border-slate-700 dark:focus:bg-slate-700 dark:text-slate-200 dark:placeholder-slate-500" />
-                    <button onClick={saveTag} className="px-3 py-1.5 bg-slate-800 hover:bg-slate-900 dark:bg-slate-700 dark:hover:bg-slate-600 text-white rounded-lg text-xs font-bold transition-colors">Guardar</button>
-                </div>
-             </div>
-             
-             <div className="bg-white dark:bg-slate-900 rounded-xl shadow-sm border border-slate-200 dark:border-slate-800 overflow-hidden max-h-[500px] overflow-y-auto custom-scrollbar">
-                 <div className="p-3 bg-slate-50 dark:bg-slate-800 border-b border-slate-100 dark:border-slate-700 text-sm font-semibold flex justify-between items-center sticky top-0 text-slate-700 dark:text-slate-200">
-                     <span>Contexto (Etiquetas)</span>
-                     {activeTagIds.length > 0 && <button onClick={() => setActiveTagIds([])} className="text-[10px] text-red-500 dark:text-red-400 font-bold hover:underline">Limpar Filtro</button>}
-                 </div>
-                 {savedTags.length === 0 && <div className="p-8 text-xs text-slate-400 dark:text-slate-500 text-center italic">Nenhuma etiqueta guardada.</div>}
-                 {savedTags.map(tag => {
-                     const isActive = activeTagIds.includes(tag.id);
-                     const isEditing = editingTagId === tag.id;
-                     
-                     return (
-                     <div key={tag.id} className={`p-3 border-b border-slate-50 dark:border-slate-800 cursor-pointer flex items-center gap-3 hover:bg-blue-50 dark:hover:bg-blue-900/20 transition-colors group ${isActive ? 'bg-blue-50 dark:bg-blue-900/20 border-l-4 border-l-blue-500' : 'border-l-4 border-l-transparent'}`} onClick={() => toggleTag(tag.id)}>
-                         <div className={`w-4 h-4 rounded border flex items-center justify-center shrink-0 ${isActive ? 'bg-blue-600 border-blue-600 text-white' : 'border-slate-300 bg-white dark:border-slate-600 dark:bg-slate-800'}`}>
-                             {isActive && <i className="fa-solid fa-check text-[10px]"></i>}
-                         </div>
-                         <div className="flex-1 min-w-0">
-                             {isEditing ? (
-                                <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
-                                    <input 
-                                        type="text" 
-                                        value={editTagName} 
-                                        onChange={(e) => setEditTagName(e.target.value)}
-                                        className="w-full px-2 py-1 text-xs border border-blue-300 dark:border-blue-500 rounded focus:ring-1 focus:ring-blue-500 bg-white dark:bg-slate-800 dark:text-white"
-                                        autoFocus
-                                    />
-                                    <button onClick={saveEditedTag} className="text-green-600 dark:text-green-500 hover:text-green-800 dark:hover:text-green-400"><i className="fa-solid fa-check"></i></button>
-                                    <button onClick={cancelEditingTag} className="text-red-500 hover:text-red-700 dark:hover:text-red-400"><i className="fa-solid fa-xmark"></i></button>
-                                </div>
-                             ) : (
-                                <>
-                                    <div className="font-bold text-xs text-slate-700 dark:text-slate-300 truncate">{tag.name}</div>
-                                    <div className="text-[10px] text-slate-500 truncate">{tag.filterDescription}</div>
-                                </>
-                             )}
-                         </div>
-                         {!isEditing && (
-                            <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                                <span className="text-[10px] font-mono text-slate-400 dark:text-slate-500 bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 rounded mr-1">{tag.sessionIds.length}</span>
-                                <button 
-                                    onClick={(e) => startEditingTag(e, tag)}
-                                    className="w-5 h-5 rounded hover:bg-blue-100 dark:hover:bg-blue-900/50 text-slate-300 dark:text-slate-500 hover:text-blue-500 dark:hover:text-blue-400 flex items-center justify-center transition-colors"
-                                    title="Renomear Etiqueta"
-                                >
-                                    <i className="fa-solid fa-pen text-[10px]"></i>
-                                </button>
-                                <button 
-                                    onClick={(e) => deleteTag(e, tag.id)}
-                                    className="w-5 h-5 rounded hover:bg-red-100 dark:hover:bg-red-900/50 text-slate-300 dark:text-slate-500 hover:text-red-500 dark:hover:text-red-400 flex items-center justify-center transition-colors"
-                                    title="Eliminar Etiqueta"
-                                >
-                                    <i className="fa-solid fa-trash text-[10px]"></i>
-                                </button>
+                        
+                        <div className="space-y-2">
+                            <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2 border-b border-slate-100 dark:border-slate-800 pb-1 mb-2">
+                                <i className="fa-solid fa-arrow-right-arrow-left"></i> Relação entre Números
                             </div>
-                         )}
-                     </div>
-                 )})}
-             </div>
+                            <MultiSelectDropdown label="De (Origem)" placeholder="Qualquer" options={allNumbers} selected={filterSourceNumbers} onChange={setFilterSourceNumbers} />
+                            <div className="flex justify-center -my-2 relative z-10"><i className="fa-solid fa-arrow-down text-slate-300 dark:text-slate-600 text-xs"></i></div>
+                            <MultiSelectDropdown label="Para (Destino)" placeholder="Qualquer" options={allNumbers} selected={filterDestNumbers} onChange={setFilterDestNumbers} />
+                        </div>
+    
+                        <div className="space-y-2 pt-2">
+                            <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2 border-b border-slate-100 dark:border-slate-800 pb-1 mb-2">
+                                <i className="fa-solid fa-people-arrows"></i> Relação entre Intervenientes
+                            </div>
+                            <MultiSelectDropdown label="De (Origem)" placeholder="Qualquer" options={allSpeakers} selected={filterSourceSpeakers} onChange={setFilterSourceSpeakers} />
+                            <div className="flex justify-center -my-2 relative z-10"><i className="fa-solid fa-arrow-down text-slate-300 dark:text-slate-600 text-xs"></i></div>
+                            <MultiSelectDropdown label="Para (Destino)" placeholder="Qualquer" options={allSpeakers} selected={filterDestSpeakers} onChange={setFilterDestSpeakers} />
+                        </div>
+    
+                        <div className="border-t border-slate-200 dark:border-slate-800 pt-2">
+                            <label className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase mb-1 block">Horário</label>
+                            <div className="grid grid-cols-2 gap-2 mb-3">
+                                <input type="time" value={inputTimeStart} onChange={(e) => setInputTimeStart(e.target.value)} className="bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-200 border border-slate-300 dark:border-slate-700 rounded text-xs px-2 py-1" />
+                                <input type="time" value={inputTimeEnd} onChange={(e) => setInputTimeEnd(e.target.value)} className="bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-200 border border-slate-300 dark:border-slate-700 rounded text-xs px-2 py-1" />
+                            </div>
+                            
+                            <label className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase mb-1 block">Duração (segundos) [Áudio]</label>
+                            <div className="grid grid-cols-2 gap-2">
+                                {renderDurationInput(inputMinDuration, setInputMinDuration, "Mín")}
+                                {renderDurationInput(inputMaxDuration, setInputMaxDuration, "Máx")}
+                            </div>
+                        </div>
+                    </div>
+                )}
+    
+                <div className="pt-2 flex gap-2">
+                    <button onClick={handleSearch} className="flex-1 py-2 bg-blue-600 text-white rounded-lg font-bold hover:bg-blue-700 transition-colors shadow-sm"><i className="fa-solid fa-search"></i> Pesquisar</button>
+                    <button onClick={handleClearFilters} className="px-3 py-2 bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 rounded-lg hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors" title="Limpar Filtros e Etiquetas"><i className="fa-solid fa-eraser"></i></button>
+                </div>
+              </div>
+            </div>
+    
+            {/* MIDDLE COLUMN: RESULTS */}
+            <div className="lg:col-span-6 flex flex-col gap-4">
+                
+                <div className="bg-white dark:bg-slate-900 p-3 rounded-xl border border-slate-200 dark:border-slate-800 flex flex-col sm:flex-row justify-between items-center shadow-sm gap-3">
+                    <div className="flex items-center gap-2 flex-wrap">
+                        <button 
+                            onClick={handleSelectAll}
+                            className="px-3 py-1.5 text-xs font-bold text-blue-700 bg-blue-50 hover:bg-blue-100 dark:text-blue-400 dark:bg-blue-900/30 dark:hover:bg-blue-900/50 rounded-lg transition-colors border border-blue-100 dark:border-blue-900/30"
+                        >
+                            <i className="fa-solid fa-check-double mr-1.5"></i> Selecionar Tudo
+                        </button>
+                        
+                        <button 
+                            onClick={handleExportResultsDocx}
+                            disabled={isExporting}
+                            className="px-3 py-1.5 text-xs font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 dark:text-slate-300 dark:bg-slate-800 dark:hover:bg-slate-700 border border-slate-200 dark:border-slate-700 rounded-lg transition-colors flex items-center gap-1"
+                            title="Exportar todos os resultados listados abaixo"
+                        >
+                            {isExporting ? <i className="fa-solid fa-spinner fa-spin"></i> : <i className="fa-solid fa-file-word text-blue-600 dark:text-blue-500"></i>}
+                            Exportar Lista ({sortedSessions.length})
+                        </button>
+    
+                        {manualSelection.size > 0 && (
+                            <>
+                                <div className="h-6 w-px bg-slate-300 dark:bg-slate-700 mx-1"></div>
+                                <button 
+                                    onClick={handleDeselectAll}
+                                    className="px-3 py-1.5 text-xs font-bold text-slate-600 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800 rounded-lg transition-colors"
+                                >
+                                    Desmarcar
+                                </button>
+                                <button 
+                                    onClick={handleExportSelectedDocx}
+                                    className="px-3 py-1.5 text-xs font-bold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 dark:text-indigo-400 dark:bg-indigo-900/30 dark:hover:bg-indigo-900/50 border border-indigo-200 dark:border-indigo-900/30 rounded-lg transition-colors flex items-center gap-1"
+                                >
+                                    <i className="fa-solid fa-file-export"></i> Exportar Sel. ({manualSelection.size})
+                                </button>
+                                <button 
+                                    onClick={handleBulkDelete}
+                                    className="px-3 py-1.5 text-xs font-bold text-red-600 bg-red-50 hover:bg-red-100 dark:text-red-400 dark:bg-red-900/30 dark:hover:bg-red-900/50 border border-red-200 dark:border-red-900/30 rounded-lg transition-colors"
+                                >
+                                    <i className="fa-solid fa-trash"></i>
+                                </button>
+                            </>
+                        )}
+                    </div>
+    
+                    <div className="flex items-center gap-2 ml-auto sm:ml-0">
+                        <div className="text-xs font-bold text-slate-400 dark:text-slate-500 uppercase"><i className="fa-solid fa-sort"></i></div>
+                        <select 
+                            value={sortOption} 
+                            onChange={(e) => setSortOption(e.target.value as SortOption)}
+                            className="bg-transparent border-none rounded-lg text-xs font-semibold text-slate-600 dark:text-slate-300 focus:ring-0 py-1 pl-0 pr-8 cursor-pointer hover:text-blue-600 dark:hover:text-blue-400 transition-colors text-right"
+                            style={{ backgroundImage: 'none' }}
+                        >
+                            <option value="date_desc">Data (Recente)</option>
+                            <option value="date_asc">Data (Antiga)</option>
+                            <option value="duration_desc">Duração</option>
+                            <option value="source_num">Nº Origem</option>
+                            <option value="dest_num">Nº Destino</option>
+                            <option value="source_name">Interv. Origem</option>
+                            <option value="dest_name">Interv. Destino</option>
+                        </select>
+                    </div>
+                </div>
+    
+                <div className="grid grid-cols-1 gap-4 content-start">
+                {sortedSessions.map((session, idx) => {
+                    const isSelected = manualSelection.has(session.sessionId);
+                    const sourceDisplay = resolve(session.sourceName) || resolve(session.sourceNumber) || session.sourceNumber || "?";
+                    const destDisplay = resolve(session.destinationName) || resolve(session.destinationNumber) || session.destinationNumber || "?";
+                    
+                    return (
+                    <div key={`${session.sessionId}-${idx}`} className={`bg-white dark:bg-slate-900 rounded-xl border shadow-sm flex flex-col relative group transition-all hover:shadow-md min-h-[380px] ${isSelected ? 'border-blue-500 ring-2 ring-blue-100 dark:ring-blue-900/50' : 'border-slate-200 dark:border-slate-800'}`}>
+                        
+                        <div className="absolute top-3 left-3 z-20">
+                            <div className="bg-white dark:bg-slate-900 rounded border border-slate-200 dark:border-slate-700 shadow-sm p-1 flex items-center justify-center cursor-pointer hover:border-blue-400">
+                                <input 
+                                    type="checkbox" 
+                                    checked={isSelected} 
+                                    onChange={() => setManualSelection(prev => { const n = new Set(prev); n.has(session.sessionId) ? n.delete(session.sessionId) : n.add(session.sessionId); return n; })} 
+                                    className="w-4 h-4 cursor-pointer bg-white dark:bg-slate-900 accent-blue-600 border-slate-300 dark:border-slate-600" 
+                                />
+                            </div>
+                        </div>
+                        
+                        <div className="bg-slate-50 dark:bg-slate-800/50 px-4 pl-10 py-3 border-b border-slate-100 dark:border-slate-800 rounded-t-xl">
+                            <div className="flex justify-between items-start">
+                                <div className="flex-1 min-w-0 pr-6">
+                                    <div className="flex items-center flex-wrap gap-2 mb-1.5">
+                                        <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${session.type === 'SMS' ? 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400' : 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400'}`}>{session.type}</span>
+                                        <span className="font-mono text-xs text-slate-700 dark:text-slate-400 font-bold bg-white dark:bg-slate-900 px-1.5 border border-slate-200 dark:border-slate-700 rounded">ID: {session.sessionId}</span>
+                                        <div className="flex items-center gap-2">
+                                            <span className="text-[10px] text-slate-500 font-medium bg-white dark:bg-slate-900 px-1.5 border border-slate-200 dark:border-slate-700 rounded truncate max-w-[120px]" title={session.target}>Alvo: {session.target}</span>
+                                            <button 
+                                                onClick={() => handleCopySession(session)}
+                                                className="text-slate-400 hover:text-blue-500 transition-colors"
+                                                title="Copiar Transcrição e Metadados"
+                                            >
+                                                {copiedId === session.sessionId ? <i className="fa-solid fa-check text-green-500"></i> : <i className="fa-regular fa-copy"></i>}
+                                            </button>
+                                            <button 
+                                                onClick={() => onDeleteSessions([session.sessionId])}
+                                                className="text-slate-400 hover:text-red-500 transition-colors opacity-0 group-hover:opacity-100"
+                                                title="Eliminar este registo"
+                                            >
+                                                <i className="fa-solid fa-trash"></i>
+                                            </button>
+                                        </div>
+                                    </div>
+                                    
+                                    {session.legalReferenceIds && session.legalReferenceIds.length > 0 && (
+                                        <div className="flex flex-wrap gap-1.5 mb-2">
+                                            {session.legalReferenceIds.map(refId => {
+                                                const ref = legalReferences.find(r => r.id === refId);
+                                                if (!ref) return null;
+                                                
+                                                return (
+                                                    <div key={refId} className={`group relative cursor-help px-2 py-0.5 rounded text-[10px] font-bold uppercase border ${getRefStyle(ref)}`}>
+                                                        {ref.label}
+                                                        <button onClick={(e) => { e.stopPropagation(); unlinkLegalReference(session.sessionId, refId); }} className="ml-1.5 hover:text-red-900 dark:hover:text-red-200"><i className="fa-solid fa-times"></i></button>
+                                                        {ref.description && ref.description.trim() !== '' && (
+                                                            <div className="absolute left-0 top-full mt-1 w-64 p-2 bg-slate-800 text-white text-xs rounded shadow-lg z-50 hidden group-hover:block font-normal normal-case">
+                                                                {ref.description}
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                    )}
+    
+                                    <div className="text-xs text-slate-800 dark:text-slate-300 leading-tight">
+                                        <div className="flex items-center gap-1.5 truncate">
+                                            <i className="fa-solid fa-phone-volume text-[10px] text-green-600 dark:text-green-500"></i> 
+                                            <span className="font-bold truncate" title={sourceDisplay}>{sourceDisplay}</span> 
+                                            {session.sourceName && resolve(session.sourceName) !== session.sourceName && <span className="text-[10px] text-slate-400 dark:text-slate-500 truncate hidden sm:inline">({session.sourceName})</span>}
+                                        </div>
+                                        <div className="flex items-center gap-1.5 mt-1 truncate">
+                                            <i className="fa-solid fa-arrow-down text-[10px] text-slate-400 dark:text-slate-500 ml-0.5"></i>
+                                            <span className="font-bold truncate" title={destDisplay}>{destDisplay}</span>
+                                            {session.destinationName && resolve(session.destinationName) !== session.destinationName && <span className="text-[10px] text-slate-400 dark:text-slate-500 truncate hidden sm:inline">({session.destinationName})</span>}
+                                        </div>
+                                    </div>
+                                </div>
+                                <div className="text-right text-xs text-slate-500 pt-0.5 shrink-0">
+                                    <div className="font-semibold text-slate-700 dark:text-slate-400">{session.date}</div>
+                                    <div className="font-mono bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 px-1 rounded inline-block mb-0.5">{session.startTime}</div>
+                                    {session.duration && (
+                                        <div className="font-mono text-[10px] text-slate-400 dark:text-slate-500 flex items-center justify-end gap-1" title="Duração">
+                                            <i className="fa-regular fa-clock text-[9px]"></i> {session.duration}
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        </div>
+    
+                        <div className="flex-1 overflow-y-auto custom-scrollbar p-3 space-y-1.5 bg-white dark:bg-slate-900">
+                            {session.content.split('\n').map((line, i) => {
+                                 const trimmed = line.trim();
+                                 if (!trimmed) return null;
+                                 const match = trimmed.match(/^([A-ZÀ-Úa-zà-ú0-9_\-\s\.()]+:)(.*)/);
+                                 if (match) {
+                                     return (
+                                         <div key={i} className="text-xs px-2 py-1 border-b border-slate-50 dark:border-slate-800 last:border-0 rounded bg-slate-50/50 dark:bg-slate-800/30 text-slate-700 dark:text-slate-300">
+                                             <span className="font-bold text-slate-900 dark:text-slate-100">{match[1]}</span>
+                                             <span>{match[2]}</span>
+                                         </div>
+                                     );
+                                 } else {
+                                     return (
+                                        <div key={i} className="text-xs px-2 py-1 border-b border-slate-50 dark:border-slate-800 last:border-0 rounded text-slate-600 dark:text-slate-400">
+                                            {trimmed}
+                                        </div>
+                                     );
+                                 }
+                            })}
+                        </div>
+    
+                        <div className="px-4 py-2 bg-white dark:bg-slate-900 border-t border-slate-100 dark:border-slate-800 rounded-b-xl">
+                            <button onClick={() => handleOpenPdf(session)} disabled={!session.pdfPath && !session.pdfUrl} className="w-full text-xs font-bold py-2 rounded-lg bg-red-50 hover:bg-red-100 dark:bg-red-900/20 text-red-700 dark:text-red-400 dark:hover:bg-red-900/30 transition-colors flex items-center justify-center gap-2 border border-transparent dark:border-red-900/30">
+                                 {loadingPdf === session.sessionId ? <i className="fa-solid fa-spinner fa-spin"></i> : <><i className="fa-regular fa-file-pdf"></i> Ver Original</>}
+                            </button>
+                        </div>
+                    </div>
+                )})}
+                </div>
+            </div>
+    
+            {/* RIGHT COLUMN: CONTEXT (TAGS & LEGAL) */}
+            <div className="lg:col-span-3 space-y-4">
+                 <div className="bg-white dark:bg-slate-900 p-5 rounded-xl shadow-sm border border-slate-200 dark:border-slate-800">
+                    <h3 className="font-semibold text-slate-700 dark:text-slate-200 mb-3 text-sm flex items-center justify-between">
+                        <span className="flex items-center gap-2"><i className="fa-solid fa-scale-balanced text-red-500"></i> Matéria Legal</span>
+                        <button onClick={() => setShowLegalModal(true)} className="text-[10px] bg-slate-100 dark:bg-slate-800 px-2 py-1 rounded hover:bg-slate-200 dark:hover:bg-slate-700"><i className="fa-solid fa-gear"></i> Gerir</button>
+                    </h3>
+                    
+                    <div className="text-xs mb-2 text-slate-500 font-medium">
+                        Associar a {manualSelection.size} itens selecionados
+                    </div>
+                    
+                    <div className="space-y-3">
+                        <MultiSelectDropdown 
+                            label="Associar Artigos" 
+                            placeholder="Selecione Artigos..." 
+                            options={availableArticles} 
+                            selected={selectedArticlesToLink} 
+                            onChange={setSelectedArticlesToLink} 
+                        />
+                        <MultiSelectDropdown 
+                            label="Associar Factos" 
+                            placeholder="Selecione Factos..." 
+                            options={availableFacts} 
+                            selected={selectedFactsToLink} 
+                            onChange={setSelectedFactsToLink} 
+                        />
+                         <MultiSelectDropdown 
+                            label="Associar Etiquetas" 
+                            placeholder="Selecione Etiquetas..." 
+                            options={availableTags} 
+                            selected={selectedTagsToLink} 
+                            onChange={setSelectedTagsToLink} 
+                        />
+                        <button 
+                            onClick={linkLegalReference} 
+                            disabled={manualSelection.size === 0 || (selectedArticlesToLink.length === 0 && selectedFactsToLink.length === 0 && selectedTagsToLink.length === 0)}
+                            className="w-full py-2 bg-slate-800 hover:bg-slate-900 dark:bg-slate-700 dark:hover:bg-slate-600 text-white rounded-lg text-xs font-bold transition-colors disabled:opacity-50"
+                        >
+                            Associar Seleção
+                        </button>
+                    </div>
+                 </div>
+            </div>
+          </div>
         </div>
-      </div>
-    </div>
-  );
+    );
 };
 
 export default Explorer;

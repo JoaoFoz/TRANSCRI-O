@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import JSZip from 'jszip';
-import { ProcessingStatus, ParsedSession, SavedTag, AliasMap, ProjectData } from './types';
+import { ProcessingStatus, ParsedSession, SavedTag, AliasMap, ProjectData, LegalReference } from './types';
 import { parseDocumentWithGemini } from './services/geminiService';
 import { generateOutputPackage } from './services/fileGenerator';
 import HelpGuide from './components/HelpGuide';
@@ -39,6 +39,7 @@ const App: React.FC = () => {
   // --- PERSISTENT STATE ---
   const [savedTags, setSavedTags] = useState<SavedTag[]>([]);
   const [aliasMap, setAliasMap] = useState<AliasMap>({});
+  const [legalReferences, setLegalReferences] = useState<LegalReference[]>([]);
 
   // Refs for custom file inputs
   const folderInputRef = useRef<HTMLInputElement>(null);
@@ -166,7 +167,7 @@ const App: React.FC = () => {
   const handleSaveProject = useCallback(async () => {
       setStatus({ step: 'GENERATING', message: 'A guardar Projeto Completo...', progress: 10 });
       try {
-          const blob = await generateOutputPackage(sessions, sourceBufferRegistry.current, { savedTags, aliasMap });
+          const blob = await generateOutputPackage(sessions, sourceBufferRegistry.current, { savedTags, aliasMap, legalReferences });
           
           const url = URL.createObjectURL(blob);
           const a = document.createElement('a');
@@ -182,7 +183,7 @@ const App: React.FC = () => {
           console.error(e);
           setStatus({ step: 'ERROR', message: 'Erro ao guardar projeto', error: e.message, progress: 0 });
       }
-  }, [sessions, savedTags, aliasMap]);
+  }, [sessions, savedTags, aliasMap, legalReferences]);
 
   // ------------------------------------------------------
   // EXPORT SESSIONS (Partial)
@@ -191,7 +192,7 @@ const App: React.FC = () => {
       if (!sessionsToExport.length) return;
       setStatus({ step: 'GENERATING', message: `A gerar pacote parcial (${sessionsToExport.length})...`, progress: 10 });
       try {
-          const blob = await generateOutputPackage(sessionsToExport, sourceBufferRegistry.current, { savedTags, aliasMap });
+          const blob = await generateOutputPackage(sessionsToExport, sourceBufferRegistry.current, { savedTags, aliasMap, legalReferences });
           
           const url = URL.createObjectURL(blob);
           const a = document.createElement('a');
@@ -207,7 +208,7 @@ const App: React.FC = () => {
           console.error(e);
           setStatus({ step: 'ERROR', message: 'Erro ao exportar', error: e.message, progress: 0 });
       }
-  }, [savedTags, aliasMap]);
+  }, [savedTags, aliasMap, legalReferences]);
 
 
   // ------------------------------------------------------
@@ -264,6 +265,15 @@ const App: React.FC = () => {
                         
                         setSavedTags(prev => [...prev, ...projectData.savedTags]);
                         setAliasMap(prev => ({ ...prev, ...projectData.aliasMap }));
+                        
+                        // New: Load Legal References
+                        if (projectData.legalReferences) {
+                            setLegalReferences(prev => {
+                                const ids = new Set(prev.map(p => p.id));
+                                const newRefs = projectData.legalReferences.filter(r => !ids.has(r.id));
+                                return [...prev, ...newRefs];
+                            });
+                        }
                         
                         const taggedSessions = projectData.sessions.map(s => ({ ...s, zipSourceId: zipId }));
                         newLoadedSessions.push(...taggedSessions);
@@ -521,6 +531,7 @@ const App: React.FC = () => {
       {mode === 'EXPLORER' && (
         <Explorer 
             sessions={sessions} 
+            setSessions={setSessions} // Pass setSessions to update links
             onBack={() => setMode('HOME')} 
             onImport={handleExplorerLoad} 
             onGetAsset={handleGetAsset}
@@ -529,6 +540,8 @@ const App: React.FC = () => {
             setSavedTags={setSavedTags}
             aliasMap={aliasMap}
             setAliasMap={setAliasMap}
+            legalReferences={legalReferences}
+            setLegalReferences={setLegalReferences}
             onSaveProject={handleSaveProject}
             onExportSessions={handleExportSessions}
             onDeleteSessions={handleDeleteSessions}

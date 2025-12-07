@@ -1,12 +1,12 @@
 import JSZip from 'jszip';
 import { PDFDocument } from 'pdf-lib';
 import { Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType, BorderStyle } from 'docx';
-import { ParsedSession, SavedTag, AliasMap, ProjectData } from '../types';
+import { ParsedSession, SavedTag, AliasMap, ProjectData, LegalReference } from '../types';
 
 export const generateOutputPackage = async (
   sessions: ParsedSession[], 
   sourceFiles: Map<string, ArrayBuffer>,
-  projectState?: { savedTags: SavedTag[], aliasMap: AliasMap }
+  projectState?: { savedTags: SavedTag[], aliasMap: AliasMap, legalReferences: LegalReference[] }
 ): Promise<Blob> => {
   const zip = new JSZip();
 
@@ -54,10 +54,11 @@ export const generateOutputPackage = async (
   // Full Project Data for Restoration
   if (projectState) {
       const projectData: ProjectData = {
-          version: "1.0",
+          version: "1.1", // Bumped version for new fields
           sessions: manifestData, // Use the version with paths
           savedTags: projectState.savedTags,
-          aliasMap: projectState.aliasMap
+          aliasMap: projectState.aliasMap,
+          legalReferences: projectState.legalReferences
       };
       zip.file('project.json', JSON.stringify(projectData, null, 2));
   }
@@ -123,7 +124,7 @@ export const generateOutputPackage = async (
                 new TextRun({ text: "ORIGEM: ", bold: true, size: 22 }),
                 new TextRun({ text: sourceStr, size: 22 }),
                 new TextRun({ text: "   ➜   ", bold: true, size: 22, color: "0000FF" }),
-                new TextRun({ text: "DESTINO: ", bold: true, size: 22 }),
+                new TextRun({ text: "DESTINO: ", bold: true }),
                 new TextRun({ text: destStr, size: 22 }),
             ]
         }),

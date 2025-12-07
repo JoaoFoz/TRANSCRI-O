@@ -32,6 +32,9 @@ export interface ParsedSession {
   // Fields for Manifest (Persisted paths in ZIP)
   pdfPath?: string;
   docxPath?: string;
+
+  // --- NEW: Legal Linking ---
+  legalReferenceIds?: string[]; // IDs of linked Articles/Facts
 }
 
 export interface ProcessingStatus {
@@ -57,6 +60,17 @@ export interface SavedTag {
     filterDescription: string;
 }
 
+// --- NEW: Legal Matter Types ---
+export type LegalReferenceType = 'ARTICLE' | 'FACT' | 'TAG';
+
+export interface LegalReference {
+    id: string;
+    type: LegalReferenceType;
+    label: string; // e.g., "Artigo 14.º" or "Facto 3"
+    description: string; // Full text content
+    status?: 'ACTIVE' | 'ARCHIVED'; // Supports archiving instead of deleting
+}
+
 export type AliasMap = Record<string, string>; // Key = Original Raw Value, Value = Display/Unified Name
 
 export interface ProjectData {
@@ -64,4 +78,6 @@ export interface ProjectData {
     sessions: ParsedSession[];
     savedTags: SavedTag[];
     aliasMap: AliasMap;
+    // New Persistence
+    legalReferences: LegalReference[];
 }
